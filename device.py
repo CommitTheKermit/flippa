@@ -1,0 +1,152 @@
+"""Local emulator transport. No arbitrary shell commands from the browser or AI."""
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import xml.etree.ElementTree as ET
+
+SDK = Path(os.environ.get('ANDROID_HOME', Path.home() / 'Library/Android/sdk'))
+ADB = shutil.which('adb') or str(SDK / 'platform-tools/adb')
+EMULATOR = str(SDK / 'emulator/emulator')
+PACKAGE = 'com.chamsae.chaekchaek.integration'
+
+
+def redact(text):
+    text = re.sub(r'(?i)(bearer\s+)\S+', r'\1[REDACTED]', text)
+    text = re.sub(r'(?i)([\"\']?(?:[\w.-]*(?:token|password|secret|api[_-]?key)|authorization|cookie|비밀번호)[\"\']?\s*[:=]\s*)(\"[^\"]*\"|\'[^\']*\'|[^\s,;&<]+)', r'\1[REDACTED]', text)
+    text = re.sub(r'\beyJ[\w-]+\.[\w-]+\.[\w-]+\b|\bsk-[\w-]{12,}\b', '[REDACTED]', text)
+    return text
+
+
+def run(args, timeout=20, binary=False):
+    try:
+        p = subprocess.run(args, capture_output=True, timeout=timeout)
+    except FileNotFoundError:
+        raise ValueError('필요한 실행 도구가 없습니다. 설치 안내를 확인하세요.') from None
+    except subprocess.TimeoutExpired:
+        raise ValueError('기기 응답 시간이 초과됐습니다. 연결 상태를 확인하세요.') from None
+    if p.returncode:
+        raise ValueError(redact(p.stderr.decode(errors='replace')[-800:]) or '명령 실행 실패')
+    return p.stdout if binary else p.stdout.decode(errors='replace')
+
+
+def devices():
+    result = []
+    for line in run([ADB, 'devices', '-l']).splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 2 and re.fullmatch(r'emulator-\d+', fields[0]):
+            result.append({'serial': fields[0], 'state': fields[1], 'label': fields[0]})
+    return result
+
+
+def adb(serial, *args, **kwargs):
+    if not re.fullmatch(r'emulator-\d+', serial):
+        raise ValueError('로컬 에뮬레이터만 연결할 수 있습니다.')
+    return run([ADB, '-s', serial, *args], **kwargs)
+
+
+def avds():
+    return run([EMULATOR, '-list-avds']).strip().splitlines() if Path(EMULATOR).exists() else []
+
+
+def boot(name):
+    if name not in avds():
+        raise ValueError('등록된 가상 기기를 선택하세요.')
+    subprocess.Popen([EMULATOR, '-avd', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def screenshot(serial):
+    data = adb(serial, 'exec-out', 'screencap', '-p', binary=True)
+    if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise ValueError('화면을 가져오지 못했습니다.')
+    return data
+
+
+def tree(serial):
+    adb(serial, 'shell', 'uiautomator', 'dump', '/sdcard/plipa-window.xml', timeout=30)
+    xml = adb(serial, 'exec-out', 'cat', '/sdcard/plipa-window.xml')
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        raise ValueError('화면 구조를 읽지 못했습니다. 화면 전환 후 다시 시도하세요.') from None
+    nodes = []
+    for elem in root.iter('node'):
+        a = elem.attrib
+        if a.get('password') == 'true':
+            continue
+        bounds = [int(v) for v in re.findall(r'\d+', a.get('bounds', ''))]
+        if len(bounds) != 4 or bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+            continue
+        text = redact(a.get('text', '') or a.get('content-desc', ''))
+        nodes.append({'id': len(nodes), 'text': text, 'bounds': bounds,
+                      'resource': a.get('resource-id', ''), 'package': a.get('package', ''),
+                      'clickable': a.get('clickable') == 'true', 'enabled': a.get('enabled') == 'true'})
+    return nodes
+
+
+def node_for(action, nodes):
+    target = action.get('target')
+    if type(target) is not int or not 0 <= target < len(nodes):
+        raise ValueError('현재 화면에 없는 조작 대상입니다.')
+    node = nodes[target]
+    if not node['enabled']:
+        raise ValueError('비활성화된 대상입니다.')
+    return node
+
+
+def auto_allowed(action):
+    # UI labels are untrusted: a button named "검색" can still mutate data.
+    return action['kind'] in ('observe', 'done')
+
+
+def perform(serial, action, nodes=None):
+    kind = action.get('kind')
+    if kind == 'tap' and nodes is not None:
+        x1, y1, x2, y2 = node_for(action, nodes)['bounds']
+        args = ['tap', str((x1 + x2)//2), str((y1 + y2)//2)]
+    elif kind in ('tap', 'swipe'):
+        coords = action.get('coords')
+        count = 2 if kind == 'tap' else 4
+        if not isinstance(coords, list) or len(coords) != count or any(type(v) is not int or not 0 <= v <= 10000 for v in coords):
+            raise ValueError('잘못된 화면 좌표입니다.')
+        args = [kind, *map(str, coords)] + (['350'] if kind == 'swipe' else [])
+    elif kind == 'text':
+        value = action.get('text', '')
+        if not isinstance(value, str) or not value or len(value) > 300 or not value.isascii() or any(ord(c) < 32 for c in value):
+            raise ValueError('화면 입력은 영문·숫자 300자까지 지원합니다. 한글은 에뮬레이터 키보드를 사용하세요.')
+        if redact(value) != value:
+            raise ValueError('비밀값은 입력하거나 기록할 수 없습니다.')
+        args = ['text', shlex.quote(value.replace(' ', '%s'))]
+    elif kind == 'key':
+        key = action.get('text')
+        if key not in ('BACK', 'HOME', 'ENTER', 'DEL'):
+            raise ValueError('지원하지 않는 키입니다.')
+        args = ['keyevent', 'KEYCODE_' + key]
+    elif kind in ('observe', 'done'):
+        return
+    else:
+        raise ValueError('지원하지 않는 조작입니다.')
+    adb(serial, 'shell', 'input', *args)
+
+
+def logs(serial, package):
+    pid = adb(serial, 'shell', 'pidof', package).strip().split()
+    if not pid:
+        raise ValueError('앱 프로세스가 없어 로그를 수집하지 못했습니다.')
+    return redact(adb(serial, 'logcat', '-d', '-t', '200', '--pid=' + pid[0], '-v', 'threadtime'))
+
+
+def launch(serial, package):
+    if not re.fullmatch(r'[a-zA-Z][\w]*(?:\.[\w]+)+', package):
+        raise ValueError('올바른 앱 패키지 이름을 입력하세요.')
+    adb(serial, 'shell', 'monkey', '-p', package, '-c', 'android.intent.category.LAUNCHER', '1')
+
+
+def environment(serial, package):
+    return {'serial': serial, 'package': package,
+            'android': adb(serial, 'shell', 'getprop', 'ro.build.version.release').strip(),
+            'model': adb(serial, 'shell', 'getprop', 'ro.product.model').strip(),
+            'app': '\n'.join(line.strip() for line in adb(serial, 'shell', 'dumpsys', 'package', package).splitlines() if 'versionName=' in line or 'versionCode=' in line)}

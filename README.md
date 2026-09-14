@@ -1,0 +1,87 @@
+# 플리파
+
+macOS의 로컬 Android 에뮬레이터에서 수동 테스트와 Codex 테스트를 진행하고, QA 증거를 골라 공유하는 작업실.
+
+## 실행
+
+`플리파.command`를 더블클릭하거나 이 폴더에서 실행한다.
+
+```sh
+python3 server.py --open
+```
+
+주소: http://127.0.0.1:4317
+
+Python 3.10 이상, Android SDK의 ADB와 Emulator, 생성한 AVD가 필요하다. AI는 설치·로그인한 Codex CLI를 사용한다. Python/JavaScript 패키지 추가 설치는 없다. 서버는 로컬 주소에만 바인딩한다. 웹 자산만 별도로 배포하면 기기 연결이 동작하지 않으므로 호스팅하지 않는다.
+
+화면의 준비 안내에서 가상 기기를 시작할 수 있다. APK를 에뮬레이터 창으로 끌어놓아 설치한 뒤 패키지를 입력한다. 첫 검증 대상은 `../2026-chaekchaek/android`에서 만든 `com.chamsae.chaekchaek.integration`이다. 플리파는 첵췍 소스를 변경하지 않는다.
+
+## 사용 흐름
+
+1. 에뮬레이터, 대상 앱 패키지, 테스트 이름을 선택하고 테스트를 시작한다.
+2. 앱 열기를 누른다. 화면 클릭·드래그와 하단 키로 수동 조작한다.
+3. AI에 현재 UI 텍스트와 테스트 대화를 전송할지 별도로 선택하고 테스트를 지시한다.
+4. AI가 기기 조작을 제안하면 내용을 읽고 확인 또는 취소한다.
+5. 필요한 시점에 증거 수집을 누른다. 스크린샷 저장은 별도 선택이다.
+6. 타임라인에서 관련 기록을 고르고 문제 남기기에 재현 순서·기대 결과·실제 결과를 적는다.
+7. 공유할 첨부 자료를 별도로 선택한 뒤 ZIP을 확인하고 동료에게 전달한다.
+
+| 상황 | 동작 |
+| --- | --- |
+| AI 관찰 | UI 구조를 읽고 관측과 추정을 구분해 답한다. 이미지·로그는 전송하지 않는다. |
+| AI 탐색 | 다음 탐색을 계획한다. 이름만으로 변경 여부를 판단하지 않으며 모든 기기 입력은 승인받는다. |
+| 조작 승인 | 승인 ID는 한 번만 사용한다. UI 구조가 달라졌으면 폐기한다. |
+| AI 중지·취소 | 실행 전인 조작을 취소한다. 이미 실행한 조작은 되돌리지 않는다. |
+| 수동·AI 충돌 | AI 실행·승인 대기 중 플리파 수동 조작을 차단한다. |
+| 연결 끊김 | 수집 실패를 누락으로 기록한다. 기존 증거는 유지한다. |
+| 재시작 | 이전 기록을 이어 열 수 있다. AI 실행과 보류 승인은 자동 재개하지 않는다. |
+| 내보내기 실패 | 입력과 원본 기록을 유지하므로 다시 시도할 수 있다. |
+
+## 저장과 공유
+
+기록 위치는 `~/Library/Application Support/Plipa/<세션 ID>/`이다. 소스 저장소와 분리되며 파일 접근 권한은 실행 사용자에게만 준다. `PLIPA_DATA` 환경변수로 변경할 수 있다. 보관 기한에 따른 자동 삭제는 없다. 필요 없는 세션 폴더는 사용자가 삭제한다.
+
+ZIP에는 `report.md`, `manifest.json`, `timeline.jsonl`, 선택한 `attachments/`가 들어간다. 단계 ID와 UTC 시간으로 증거를 연결한다. `fact=true`는 실제 관측·실행, `fact=false`는 AI 제안 또는 사용자 메모다. 수집 누락은 `missing`에 남긴다. AI 제안은 실제 실행 성공을 의미하지 않는다.
+
+동료 공유 선택과 외부 AI 전송 동의는 독립이다. 스크린샷·UI 구조·로그 첨부는 기본적으로 내보내지 않는다. 보고서와 선택한 타임라인 본문은 항상 포함되므로 전달 전에 확인한다.
+
+API 키·토큰·비밀번호를 입력·메모·증거에 넣지 않는다. 알려진 credential 패턴과 password UI 노드는 텍스트 수집 전에 제거한다. 패턴 탐지는 임의의 비밀 문자열을 완벽하게 식별하지 못하며, 스크린샷에 대한 자동 마스킹은 없다. 비밀값이 보이는 화면은 저장하지 않는다. 일반 개인정보도 사용자가 검토하고 공유 범위를 선택해야 한다.
+
+Codex는 임시 작업 디렉터리에서 사용자 설정·규칙을 로드하지 않고, ephemeral/read-only 모드와 셸·브라우저·앱·플러그인·다중 에이전트 도구 비활성화 설정으로 실행한다. 실제 기기 조작은 `device.py`의 허용 목록과 `server.py`의 승인 경로에서만 수행한다. 원문 UI 텍스트는 신뢰할 수 없는 관측 데이터로 전달한다. API 키를 소스에 넣지 않으며 기존 Codex 로그인 상태를 사용한다. 모델을 지정하려면 `PLIPA_MODEL`, 포트를 바꾸려면 `PLIPA_PORT` 환경변수를 사용한다.
+
+## 첫 버전의 범위와 한계
+
+- 화면은 ADB 스크린샷을 약 1초 간격으로 갱신한다. 영상 스트리밍 수준의 반응 속도는 아니다.
+- 플리파 입력란은 영문·숫자를 지원한다. 한글은 에뮬레이터의 키보드를 사용한다. 플리파 외부에서 한 조작의 세부 내용은 자동 기록되지 않는다.
+- 로그캣은 증거 수집 시 대상 앱 PID의 최근 200줄 표본이다. 연결 전 기록, 종료된 앱 프로세스 로그, 지속 수집은 보장하지 않는다.
+- 네트워크 본문, 영상 녹화, 크래시·ANR 전용 수집, 앱 내부 상태, 성능 트레이스는 아직 구현하지 않았다.
+- AI는 한 번에 최대 12단계 후 중지한다. 승인 뒤 이어지는 실행에도 같은 한도를 적용한다. 로그인·비밀번호 입력은 AI에 맡기지 않는다.
+- 원격 실행은 보류한다. 이후 사용자별 기기·저장소·접근 권한을 분리하고, 로그인된 공용 스냅샷은 만들지 않는다. 실제 앱으로 로컬 자원 사용과 원격 클릭·스크롤·한글 입력 지연을 비교한 뒤 결정한다.
+
+## 검증
+
+```sh
+python3 -m unittest -v
+node --check dist/app.js
+```
+
+2026-09-14 검증:
+
+- 승인 전 조작 차단, 취소·재사용·화면 변경 승인 차단, 복원·누락 기록, ZIP 선택 범위, 비밀값 패턴 제거, HTTP Origin/CSRF 검증: 7개 통과.
+- Codex CLI에 합성 UI를 입력해 JSON `done` 응답 확인. 실제 서비스 데이터는 이 연결 테스트에 보내지 않았다.
+- 첵췍 `:app:assembleIntegration` 성공. `Pixel_6a_API_33_2` / `emulator-5554`에 설치·실행했다.
+- 실제 기기의 PNG 화면 응답, HOME 조작·앱 재실행, UI JSON과 앱 로그 수집(누락 0개), 자료 조회, 단계가 연결된 QA ZIP 구성을 확인했다. 서버 재시작 후 기존 기록 복원도 확인했다.
+- 브라우저 시각·상호작용 QA와 실제 데이터 변경 조작은 수행하지 않았다. WebMCP 상태 조회는 지원 환경에서 실행 검증하지 않았다.
+- 검증 당시 Mac은 arm64, 메모리 16 GiB였다. 에뮬레이터가 메모리 여유 부족으로 소프트웨어 렌더링을 사용한다고 보고했다. 입력 지연을 수치 측정한 결과는 아직 없다.
+
+## 근거
+
+- 사용자 문맥: `~/.Codex/todo-context/android-debug-qa-tool.md`
+- [Codex 비대화형 실행](https://learn.chatgpt.com/docs/non-interactive-mode), 로컬 `codex exec --help`, `codex features list`
+- [Codex 설정](https://learn.chatgpt.com/docs/config-file/config-reference)
+- [Android Emulator 명령줄](https://developer.android.com/studio/run/emulator-commandline)
+- [UI Automator](https://developer.android.com/training/testing/other-components/ui-automator)
+- [Android bug report](https://developer.android.com/studio/debug/bug-report)
+- [Perfetto](https://perfetto.dev/docs/)
+- [Google emulator container 예제](https://github.com/google/android-emulator-container-scripts): 실험적 참고 후보. 플리파에서의 성능 미검증.
+- [GCP 중첩 가상화](https://docs.cloud.google.com/compute/docs/instances/nested-virtualization/overview)
