@@ -7,12 +7,12 @@ macOS의 로컬 Android 에뮬레이터에서 수동 테스트와 Codex 테스�
 `플리파.command`를 더블클릭하거나 이 폴더에서 실행한다.
 
 ```sh
-python3 server.py --open
+./플리파.command
 ```
 
 주소: http://127.0.0.1:4317
 
-Python 3.10 이상, Android SDK의 ADB와 Emulator, 생성한 AVD가 필요하다. AI는 설치·로그인한 Codex CLI를 사용한다. Python/JavaScript 패키지 추가 설치는 없다. 서버는 로컬 주소에만 바인딩한다. 웹 자산만 별도로 배포하면 기기 연결이 동작하지 않으므로 호스팅하지 않는다.
+Python 3.10 이상, Android SDK의 ADB와 Emulator, 생성한 AVD가 필요하다. AI는 설치·로그인한 Codex CLI를 사용한다. 첫 실행 시 전용 `.venv`에 `requirements.txt`의 gRPC/Protobuf 패키지를 설치한다. JavaScript 추가 패키지는 없다. 서버는 로컬 주소에만 바인딩한다. 웹 자산만 별도로 배포하면 기기 연결이 동작하지 않으므로 호스팅하지 않는다.
 
 화면의 준비 안내에서 가상 기기를 시작할 수 있다. APK를 에뮬레이터 창으로 끌어놓아 설치한 뒤 패키지를 입력한다. 첫 검증 대상은 `../2026-chaekchaek/android`에서 만든 `com.chamsae.chaekchaek.integration`이다. 플리파는 첵췍 소스를 변경하지 않는다.
 
@@ -51,7 +51,7 @@ Codex는 임시 작업 디렉터리에서 사용자 설정·규칙을 로드하�
 
 ## 첫 버전의 범위와 한계
 
-- 화면은 ADB 스크린샷을 약 1초 간격으로 갱신한다. 영상 스트리밍 수준의 반응 속도는 아니다.
+- 화면은 인증된 로컬 Emulator gRPC의 PNG 스트림을 중앙 캔버스에 표시한다. 에뮬레이터의 별도 창을 이식하는 방식은 아니다. 화면 변화가 있을 때 전송하며 긴 변을 최대 960px로 줄인다. Mac 자원과 앱 렌더링 속도에 따라 갱신 속도가 달라진다.
 - 플리파 입력란은 영문·숫자를 지원한다. 한글은 에뮬레이터의 키보드를 사용한다. 플리파 외부에서 한 조작의 세부 내용은 자동 기록되지 않는다.
 - 로그캣은 증거 수집 시 대상 앱 PID의 최근 200줄 표본이다. 연결 전 기록, 종료된 앱 프로세스 로그, 지속 수집은 보장하지 않는다.
 - 네트워크 본문, 영상 녹화, 크래시·ANR 전용 수집, 앱 내부 상태, 성능 트레이스는 아직 구현하지 않았다.
@@ -61,8 +61,9 @@ Codex는 임시 작업 디렉터리에서 사용자 설정·규칙을 로드하�
 ## 검증
 
 ```sh
-python3 -m unittest -v
+.venv/bin/python -m unittest -v
 node --check dist/app.js
+node test_stream.mjs
 ```
 
 2026-09-14 검증:
@@ -73,6 +74,31 @@ node --check dist/app.js
 - 실제 기기의 PNG 화면 응답, HOME 조작·앱 재실행, UI JSON과 앱 로그 수집(누락 0개), 자료 조회, 단계가 연결된 QA ZIP 구성을 확인했다. 서버 재시작 후 기존 기록 복원도 확인했다.
 - 브라우저 시각·상호작용 QA와 실제 데이터 변경 조작은 수행하지 않았다. WebMCP 상태 조회는 지원 환경에서 실행 검증하지 않았다.
 - 검증 당시 Mac은 arm64, 메모리 16 GiB였다. 에뮬레이터가 메모리 여유 부족으로 소프트웨어 렌더링을 사용한다고 보고했다. 입력 지연을 수치 측정한 결과는 아직 없다.
+
+## 실시간 화면 연결
+
+`emulator.py`는 실행 중인 로컬 에뮬레이터의 discovery 파일에서 연결 설정을 메모리로만 읽고, Bearer 인증으로 gRPC에 접속한다. 인증값은 브라우저·기록·로그로 보내지 않는다. 연결 설정이 없으면 에뮬레이터를 종료하고 플리파의 준비 안내에서 다시 시작한다. 플리파가 실행하는 기기는 `-grpc-use-token`을 사용한다.
+
+화면은 CSRF로 보호한 POST 스트림으로 전달한다. 4바이트 big-endian 길이 뒤에 PNG가 오며 길이 0은 연결 확인용이다. 서버의 대기 프레임은 최신 1장만 유지한다. 브라우저는 끊기면 다시 연결하며, 숨긴 탭에서는 스트림을 중지한다. 실시간 화면 자체는 디스크에 저장하지 않는다.
+
+터치는 누르기·이동·떼기를 즉시 전달한다. 아직 전송하지 못한 이동 좌표는 최신 값으로 합친다. 한 번의 터치를 한 타임라인 항목으로 기록하며 긴 경로는 표본으로 줄였음을 표시한다. 화면에 초점을 둔 영문 키 입력과 하단 기능 키도 gRPC로 전달한다. 별도 문자열 입력란·AI 승인 조작·증거 수집은 기존 ADB 경로를 사용한다.
+
+한 번에 한 터치만 허용하며 연결·세션 소유자를 검사한다. AI 시작, 세션 변경, 창 초점 상실, 연결 종료 시 터치를 해제한다. 입력 통신이 멈추면 3초 이상 경과 후 감시기가 해제를 요청한다. 에뮬레이터 자체가 연결 불가이면 전달을 보장할 수 없으므로 수집 누락으로 남긴다. 기기 회전의 화면 비율은 반영하지만 접이식·다중 디스플레이·멀티터치·한글 IME 통합은 미검증 또는 미지원이다.
+
+구조상 기존 `Workbench`는 세션 저장과 AI 실행 조율을 함께 맡아 단일 책임 원칙에서 벗어나 있다. 이번에는 에뮬레이터 통신을 별도 파일에 두고 기존 승인·기록 경로를 유지했다.
+
+2026-09-15 추가 검증:
+
+- Python 테스트 9개 통과: 기존 7개와 터치 소유권·좌표 검증·AI 차단·세션 변경·타임아웃, 스트림 프레임·유휴 연결·종료 시 터치 해제 검사.
+- JavaScript 프레임 파서 검사 통과: 분할·합쳐진 데이터, heartbeat, 잘린 데이터, 크기 상한. 구문 검사 통과.
+- 실행 중인 `emulator-5554`에 HTTP 스트림 연결 후 홈 화면을 드래그하고 첵췍 앱을 다시 열었다. 첫 PNG 수신 265.4ms, 입력 HTTP 응답 중앙값 2.1ms(최대 8.4ms), 약 1.03초 드래그 관측 구간에서 변경 프레임 21장, 프레임 간격 중앙값 32.2ms였다.
+- 위 수치는 단일 로컬 실행의 서버 응답·프레임 수신 측정이며 브라우저 디코딩·그리기와 사람의 체감 지연을 포함하지 않는다. 지속 FPS, 설치형 앱과의 비교, 브라우저 시각·상호작용 QA는 미검증이다.
+
+`emulator.proto`는 AOSP 정의의 호환 부분집합이다. 원문 저작권 고지와 Apache 2.0 라이선스를 보존한다. 생성 파일 재생성이 필요할 때만 `grpcio-tools==1.84.0`을 설치하고 다음을 실행한다.
+
+```sh
+.venv/bin/python -m grpc_tools.protoc -I. --python_out=. emulator.proto
+```
 
 ## 근거
 
@@ -85,3 +111,6 @@ node --check dist/app.js
 - [Perfetto](https://perfetto.dev/docs/)
 - [Google emulator container 예제](https://github.com/google/android-emulator-container-scripts): 실험적 참고 후보. 플리파에서의 성능 미검증.
 - [GCP 중첩 가상화](https://docs.cloud.google.com/compute/docs/instances/nested-virtualization/overview)
+
+- [Emulator gRPC 원본 정의](https://android.googlesource.com/platform/tools/base/+/studio-master-dev/emulator/proto/emulator_controller.proto)
+- [Android Studio EmulatorView 구현](https://android.googlesource.com/platform/tools/adt/idea/+/refs/heads/mirror-goog-studio-main/streaming/src/com/android/tools/idea/streaming/emulator/EmulatorView.kt)

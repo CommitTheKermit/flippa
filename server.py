@@ -1,4 +1,4 @@
-"""플리파: single-user loopback QA workbench, Python standard library only."""
+"""플리파: single-user loopback QA workbench, local emulator streaming."""
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -13,6 +13,10 @@ import uuid
 import zipfile
 import device
 import ai
+import emulator
+import math
+import queue
+import struct
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get('PLIPA_DATA', Path.home() / 'Library/Application Support/Plipa'))
@@ -45,6 +49,8 @@ class Workbench:
         self.pending = None
         self.current = None
         self.goal = ''
+        self.viewers = {}
+        self.pointer = None
 
     def session(self):
         if not self.current:
@@ -104,6 +110,7 @@ class Workbench:
             sid = datetime.now().strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
             folder = self.root/sid
             folder.mkdir(mode=0o700)
+            self.release_pointer()
             self.current = {'id': sid, 'title': text(title, 120), 'serial': serial,
                             'package': package, 'created': now(), 'environment': env}
             save_json(folder/'session.json', self.current)
@@ -118,6 +125,7 @@ class Workbench:
             path = self.root/sid/'session.json'
             if not path.is_file():
                 raise ValueError('기록이 없습니다.')
+            self.release_pointer()
             self.current = json.loads(path.read_text())
 
     def capture(self, screen=False):
@@ -147,11 +155,103 @@ class Workbench:
         with self.lock:
             if self.running or self.pending:
                 raise ValueError('AI를 중지하거나 보류 조작을 취소한 뒤 직접 조작하세요.')
+            self.release_pointer()
             device.perform(self.session()['serial'], action)
             safe_action = dict(action)
             if action.get('kind') == 'text':
                 safe_action['text'] = '[입력 내용 기록 안 함]'
             self.event('manual', '수동 조작', action=safe_action, fact=True)
+
+    def release_pointer(self, viewer=None):
+        with self.lock:
+            p = self.pointer
+            if not p or (viewer is not None and viewer != p['viewer']):
+                return
+            missing = []
+            try:
+                p['connection'].mouse(*p['last'], False)
+            except ValueError:
+                missing.append('연결 오류로 터치 해제 전달 여부 미확인')
+                raise
+            finally:
+                self.pointer = None
+                self.event('manual', '수동 터치 종료 요청' if missing else '수동 터치 종료', fact=True, missing=missing,
+                           action={'kind': 'gesture', 'points': p['points'],
+                                   'coordinates': 'normalized', 'sampled': p['sampled'],
+                                   'duration_ms': round((time.monotonic()-p['start'])*1000)})
+
+    def pointer_timeout(self, pointer):
+        with self.lock:
+            if self.pointer is not pointer:
+                return
+            if time.monotonic() - self.pointer['updated'] >= 3:
+                try:
+                    self.release_pointer()
+                except ValueError:
+                    pass
+            else:
+                timer = threading.Timer(1, self.pointer_timeout, args=(self.pointer,))
+                timer.daemon = True
+                timer.start()
+
+    def live_input(self, data):
+        with self.lock:
+            viewer = data.get('viewer')
+            if not isinstance(viewer, str) or viewer not in self.viewers:
+                raise ValueError('화면 연결을 기다린 뒤 조작하세요.')
+            sid, connection = self.viewers[viewer]
+            if data.get('session') != self.session()['id'] or sid != self.session()['id']:
+                raise ValueError('테스트가 바뀌었습니다. 화면을 다시 연결하세요.')
+            phase = data.get('phase')
+            if phase == 'cancel':
+                self.release_pointer(viewer)
+                return
+            if self.running or self.pending:
+                raise ValueError('AI를 중지하거나 보류 조작을 취소한 뒤 직접 조작하세요.')
+            if phase == 'key':
+                key = data.get('key')
+                if not isinstance(key, str) or not (key in ('GoBack', 'GoHome', 'Enter', 'Backspace',
+                    'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape') or
+                    len(key) == 1 and 32 <= ord(key) <= 126):
+                    raise ValueError('지원하지 않는 키입니다. 한글은 에뮬레이터 키보드를 사용하세요.')
+                if self.pointer:
+                    raise ValueError('터치를 끝낸 뒤 키를 입력하세요.')
+                connection.key(key)
+                self.event('manual', '수동 키 입력', action={'kind': 'key',
+                           'text': key if len(key) > 1 else '[입력 내용 기록 안 함]'}, fact=True)
+                return
+            if phase not in ('down', 'move', 'up'):
+                raise ValueError('잘못된 터치 요청입니다.')
+            coords = [data.get('x'), data.get('y')]
+            if any(type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1 for v in coords):
+                raise ValueError('잘못된 화면 좌표입니다.')
+            if phase == 'down':
+                if self.pointer:
+                    raise ValueError('이미 진행 중인 터치가 있습니다.')
+                self.pointer = {'viewer': viewer, 'connection': connection, 'last': coords,
+                                'start': time.monotonic(), 'updated': time.monotonic(),
+                                'points': [coords], 'sampled': False}
+                timer = threading.Timer(1, self.pointer_timeout, args=(self.pointer,))
+                timer.daemon = True
+                timer.start()
+            p = self.pointer
+            if not p or p['viewer'] != viewer:
+                raise ValueError('진행 중인 터치가 아닙니다.')
+            p['last'] = coords
+            p['updated'] = time.monotonic()
+            if coords != p['points'][-1]:
+                if len(p['points']) >= 120:
+                    p['points'] = p['points'][::2]
+                    p['sampled'] = True
+                p['points'].append(coords)
+            if phase == 'up':
+                self.release_pointer(viewer)
+            else:
+                try:
+                    connection.mouse(*coords, True)
+                except ValueError:
+                    self.release_pointer(viewer)
+                    raise
 
     def start_ai(self, goal, consent):
         with self.lock:
@@ -160,6 +260,7 @@ class Workbench:
                 raise ValueError('AI에 현재 화면 텍스트를 전송하는 데 동의해야 합니다.')
             if self.running or self.pending:
                 raise ValueError('진행 중인 AI 테스트가 있습니다.')
+            self.release_pointer()
             self.goal = text(goal, 3000)
             self.event('user', self.goal, external_ai_consent=True)
             self._spawn()
@@ -320,13 +421,76 @@ class Handler(BaseHTTPRequestHandler):
                         return self.reply({'error': '자료 파일이 없습니다. 원본 기록은 유지됩니다.'}, 404)
                     payload = attachment.read_bytes()
                 return self.reply(payload, mime='image/png' if name.endswith('.png') else 'text/plain; charset=utf-8')
-            assets = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
+            assets = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/stream.js': ('stream.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
             if path in assets:
                 name, mime = assets[path]
                 return self.reply((ROOT/'dist'/name).read_bytes(), mime=mime)
             self.reply({'error': '찾을 수 없습니다.'}, 404)
         except ValueError as exc:
             self.reply({'error': str(exc)}, 400)
+
+    def stream(self, data):
+        w = self.server.workbench
+        viewer = data.get('viewer')
+        if not isinstance(viewer, str) or not device.re.fullmatch(r'[a-zA-Z0-9-]{1,64}', viewer):
+            raise ValueError('잘못된 화면 연결 ID입니다.')
+        with w.lock:
+            sid = w.session()['id']
+            if data.get('session') != sid or viewer in w.viewers:
+                raise ValueError('화면 연결을 다시 시작하세요.')
+            connection = emulator.Connection(w.session()['serial'])
+            w.viewers[viewer] = (sid, connection)
+        frames = connection.frames()
+        latest = queue.Queue(maxsize=1)
+        ended = threading.Event()
+
+        def receive():
+            try:
+                for frame in frames:
+                    width, height = connection.size
+                    if (frame.format.width > frame.format.height) != (width > height):
+                        connection.size = (height, width)
+                    try:
+                        latest.get_nowait()
+                    except queue.Empty:
+                        pass
+                    latest.put_nowait(frame.image)
+            except Exception:
+                pass  # Never expose emulator authentication metadata.
+            finally:
+                ended.set()
+
+        worker = threading.Thread(target=receive, daemon=True)
+        worker.start()
+        try:
+            self.connection.settimeout(3)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.end_headers()
+            while not ended.is_set():
+                with w.lock:
+                    if w.session()['id'] != sid:
+                        break
+                try:
+                    frame = latest.get(timeout=1)
+                except queue.Empty:
+                    frame = b''  # Idle screens have no frames; heartbeat detects closed viewers.
+                self.wfile.write(struct.pack('!I', len(frame)) + frame)
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            frames.cancel()
+            with w.lock:
+                try:
+                    w.release_pointer(viewer)
+                except ValueError:
+                    pass
+                w.viewers.pop(viewer, None)
+            connection.close()
+            worker.join(timeout=3)
 
     def do_POST(self):
         if not self.trusted() or not secrets.compare_digest(self.headers.get('X-Plipa-CSRF', ''), self.server.csrf):
@@ -341,7 +505,11 @@ class Handler(BaseHTTPRequestHandler):
             w = self.server.workbench
             path = urlsplit(self.path).path
             # ponytail: one local user, serialize device operations; per-device queues for multiple users.
-            if path == '/api/approve':
+            if path == '/api/stream':
+                return self.stream(data)
+            elif path == '/api/input':
+                w.live_input(data)
+            elif path == '/api/approve':
                 w.approve(data.get('id'), data.get('approved'))
             elif path == '/api/stop':
                 w.cancel()
@@ -356,7 +524,9 @@ class Handler(BaseHTTPRequestHandler):
                     elif path == '/api/launch':
                         if w.running or w.pending:
                             raise ValueError('AI를 중지한 뒤 앱을 실행하세요.')
-                        device.launch(w.session()['serial'], w.session()['package'])
+                        with w.lock:
+                            w.release_pointer()
+                            device.launch(w.session()['serial'], w.session()['package'])
                         w.event('manual', '대상 앱 실행', fact=True)
                     elif path == '/api/manual':
                         w.manual(data)
@@ -393,7 +563,10 @@ def main():
     except KeyboardInterrupt:
         server.workbench.cancel()
     finally:
-        server.server_close()
+        try:
+            server.workbench.release_pointer()
+        finally:
+            server.server_close()
 
 
 if __name__ == '__main__':

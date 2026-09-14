@@ -55,7 +55,7 @@ def avds():
 def boot(name):
     if name not in avds():
         raise ValueError('등록된 가상 기기를 선택하세요.')
-    subprocess.Popen([EMULATOR, '-avd', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    subprocess.Popen([EMULATOR, '-avd', name, '-grpc-use-token'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def screenshot(serial):

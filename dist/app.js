@@ -1,6 +1,9 @@
 'use strict';
+import {readFrames} from './stream.js';
 const $ = id => document.getElementById(id);
-let csrf = '', state = {events:[]}, lastEvents = '', lastSessions = '', screenURL;
+let csrf = '', state = {events:[]}, lastEvents = '', lastSessions = '';
+let streamControl, binding, gesture, inputBusy = false, inputs = [];
+const screen = $('screen');
 const selected = new Set();
 function notice(message, error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error);}
 async function api(path, data){
@@ -12,6 +15,8 @@ async function task(fn){try{await fn();await refresh();}catch(e){notice(e.messag
 function node(tag,content,className){const n=document.createElement(tag);if(content!==undefined)n.textContent=content;if(className)n.className=className;return n;}
 async function refresh(){
   state=await api('state');csrf=state.csrf;
+  if(binding && binding.session !== state.session?.id) streamControl?.abort();
+  if(state.running || state.pending) cancelTouch();
   const sessions=JSON.stringify(state.sessions);
   if(sessions!==lastSessions){lastSessions=sessions;const old=$('sessions').value;$('sessions').replaceChildren(new Option('기록 선택',''));for(const s of state.sessions)$('sessions').add(new Option(s.title+' · '+s.created.slice(0,10),s.id));$('sessions').value=old;}
   const events=JSON.stringify(state.events);
@@ -36,9 +41,32 @@ async function refresh(){
 }
 async function refreshDevices(){const result=await api('devices');const old=$('devices').value;$('devices').replaceChildren();for(const d of result.devices)$('devices').add(new Option(d.label+' · '+d.state,d.serial));if(!result.devices.length)$('devices').add(new Option('연결된 기기 없음',''));if(old)$('devices').value=old;$('avds').replaceChildren(...result.avds.map(a=>new Option(a,a)));}
 async function screenLoop(){
-  try{if(state.session&&!document.hidden){const r=await fetch('/api/screen');if(!r.ok)throw new Error('연결 확인 중');const blob=await r.blob();const old=screenURL;screenURL=URL.createObjectURL(blob);$('screen').src=screenURL;$('screen').hidden=false;$('screenEmpty').hidden=true;if(old)URL.revokeObjectURL(old);}}
-  catch(e){$('screen').hidden=true;$('screenEmpty').hidden=false;$('screenEmpty').textContent='기기 연결을 확인하세요. 저장한 기록은 남아 있습니다.';}
-  setTimeout(screenLoop,1000);
+  if(state.session && !document.hidden){
+    const session=state.session.id, viewer=crypto.randomUUID();
+    streamControl=new AbortController();
+    const control=streamControl;
+    try{
+      const response=await fetch('/api/stream',{method:'POST',signal:control.signal,
+        headers:{'Content-Type':'application/json','X-Plipa-CSRF':csrf},body:JSON.stringify({session,viewer})});
+      if(!response.ok) throw new Error((await response.json()).error);
+      const reader=response.body.getReader();
+      try{
+        for await (const png of readFrames(reader)){
+          const bitmap=await createImageBitmap(new Blob([png],{type:'image/png'}));
+          if(control.signal.aborted || state.session?.id!==session){bitmap.close();break;}
+          screen.width=bitmap.width;screen.height=bitmap.height;
+          screen.getContext('2d',{alpha:false}).drawImage(bitmap,0,0);bitmap.close();
+          binding={session,viewer};screen.hidden=false;$('screenEmpty').hidden=true;
+        }
+      }finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
+    }catch(e){
+      if(e.name!=='AbortError') $('screenEmpty').textContent=e.message || '화면 연결을 확인하세요. 기록은 보존됩니다.';
+    }finally{
+      cancelTouch();binding=null;screen.hidden=true;$('screenEmpty').hidden=false;
+      control.abort();
+    }
+  }
+  setTimeout(screenLoop,500);
 }
 $('startForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('start',{serial:$('devices').value,package:$('package').value,title:$('title').value});selected.clear();notice('테스트를 시작했습니다. 앱을 열고 조작하세요.');});};
 $('refresh').onclick=()=>task(refreshDevices);
@@ -52,14 +80,63 @@ $('example').onclick=()=>{$('goal').value='현재 화면을 살펴보고 테스�
 $('stop').onclick=()=>task(()=>api('stop',{}));
 $('approve').onclick=()=>task(()=>api('approve',{id:state.pending?.id,approved:true}));
 $('reject').onclick=()=>task(()=>api('approve',{id:state.pending?.id,approved:false}));
-document.querySelectorAll('[data-key]').forEach(b=>b.onclick=()=>task(()=>api('manual',{kind:'key',text:b.dataset.key})));
+const androidKeys={BACK:'GoBack',HOME:'GoHome',ENTER:'Enter',DEL:'Backspace'};
+document.querySelectorAll('[data-key]').forEach(b=>b.onclick=()=>queueKey(androidKeys[b.dataset.key]));
 $('inputForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('manual',{kind:'text',text:$('input').value});$('input').value='';});};
-function coords(e){const img=$('screen'),r=img.getBoundingClientRect();return [Math.round((e.clientX-r.left)/r.width*img.naturalWidth),Math.round((e.clientY-r.top)/r.height*img.naturalHeight)];}
-let down;
-$('screen').onpointerdown=e=>{down=coords(e);$('screen').setPointerCapture(e.pointerId);};
-$('screen').onpointercancel=()=>{down=null;};
-$('screen').onpointerup=e=>{if(!down)return;const end=coords(e),start=down;down=null;const swipe=Math.hypot(end[0]-start[0],end[1]-start[1])>30;task(()=>api('manual',{kind:swipe?'swipe':'tap',coords:swipe?[...start,...end]:end}));};
-$('screen').onkeydown=e=>{const key={Escape:'BACK',Enter:'ENTER',Backspace:'DEL'}[e.key];if(key){e.preventDefault();task(()=>api('manual',{kind:'key',text:key}));}};
+function coords(e){const r=screen.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}
+function enqueue(input){
+  // Keep only the newest unsent move; preserve down/up ordering.
+  if(input.phase==='move' && inputs.at(-1)?.phase==='move') inputs[inputs.length-1]=input;
+  else inputs.push(input);
+  pumpInputs();
+}
+async function pumpInputs(){
+  if(inputBusy)return;
+  inputBusy=true;
+  try{while(inputs.length)await api('input',inputs.shift());}
+  catch(e){inputs=[];cancelTouch();notice(e.message,true);}
+  finally{inputBusy=false;if(inputs.length)pumpInputs();}
+}
+function cancelTouch(){
+  if(!gesture)return;
+  const old=gesture;gesture=null;
+  inputs=inputs.filter(i=>i.phase!=='move');
+  enqueue({...old.binding,phase:'cancel'});
+}
+function queueKey(key){
+  if(!binding || state.running || state.pending || gesture || inputs.length>=32)return;
+  enqueue({...binding,phase:'key',key});
+}
+screen.onpointerdown=e=>{
+  if(!binding || gesture || state.running || state.pending || e.button!==0)return;
+  e.preventDefault();screen.focus();screen.setPointerCapture(e.pointerId);
+  gesture={id:e.pointerId,binding:{...binding},...coords(e)};
+  enqueue({...binding,phase:'down',...coords(e)});
+};
+screen.onpointermove=e=>{
+  if(gesture?.id!==e.pointerId)return;
+  Object.assign(gesture,coords(e));enqueue({...gesture.binding,phase:'move',...coords(e)});
+};
+screen.onpointerup=e=>{
+  if(gesture?.id!==e.pointerId)return;
+  const old=gesture;gesture=null;enqueue({...old.binding,phase:'up',...coords(e)});
+};
+screen.onpointercancel=cancelTouch;
+screen.onlostpointercapture=cancelTouch;
+window.addEventListener('blur',cancelTouch);
+document.addEventListener('visibilitychange',()=>{if(document.hidden){cancelTouch();streamControl?.abort();}});
+window.addEventListener('pagehide',()=>{
+  if(gesture)fetch('/api/input',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json','X-Plipa-CSRF':csrf},body:JSON.stringify({...gesture.binding,phase:'cancel'})}).catch(()=>{});
+  streamControl?.abort();
+});
+setInterval(()=>{if(gesture)enqueue({...gesture.binding,phase:'move',x:gesture.x,y:gesture.y});},1000);
+screen.onkeydown=e=>{
+  if(e.isComposing || e.metaKey || e.ctrlKey || e.altKey)return;
+  const key=e.key==='Escape'?'GoBack':e.key;
+  if((key.length===1 && key.charCodeAt(0)>=32 && key.charCodeAt(0)<=126) || ['GoBack','Enter','Backspace','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(key)){
+    e.preventDefault();queueKey(key);
+  }
+};
 $('helpOpen').onclick=()=>$('help').showModal();$('helpClose').onclick=()=>$('help').close();
 $('attachmentClose').onclick=()=>$('attachment').close();
 $('reportOpen').onclick=()=>{if(!selected.size){notice('타임라인에서 공유할 기록을 먼저 선택하세요.',true);return;}$('reportTitle').value=state.session?.title||'';$('steps').value=state.events.filter(e=>selected.has(e.id)).map((e,i)=>`${i+1}. ${e.message}`).join('\n');$('report').showModal();};

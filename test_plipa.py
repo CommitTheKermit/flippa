@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import urllib.request
 import urllib.error
 import zipfile
@@ -102,6 +102,91 @@ class PlipaTest(unittest.TestCase):
             self.assertNotIn('SYNTHETIC_VALUE', device.redact(sample))
         self.w.event('note', 'password="SYNTHETIC_VALUE"')
         self.assertNotIn('SYNTHETIC_VALUE', (self.w.directory()/'timeline.jsonl').read_text())
+
+    def test_live_input_ownership_approval_and_release(self):
+        connection = Mock()
+        self.w.viewers = {'viewer': ('test', connection), 'other': ('test', connection)}
+        request = {'session': 'test', 'viewer': 'viewer', 'phase': 'down', 'x': .2, 'y': .3}
+        with patch('server.threading.Timer'):
+            for invalid in [dict(request, session='old'), dict(request, x=float('nan')),
+                            dict(request, x=True), dict(request, phase='move')]:
+                with self.assertRaises(ValueError): self.w.live_input(invalid)
+            connection.mouse.assert_not_called()
+            self.w.live_input(request)
+            connection.mouse.assert_called_with(.2, .3, True)
+            with self.assertRaises(ValueError): self.w.live_input(dict(request, viewer='other', phase='up'))
+            self.w.live_input(dict(request, viewer='other', phase='cancel'))
+            self.assertIsNotNone(self.w.pointer)
+            self.w.live_input(dict(request, phase='move', y=.8))
+            self.w.live_input(dict(request, phase='up', y=.9))
+            connection.mouse.assert_called_with(.2, .9, False)
+            self.assertIsNone(self.w.pointer)
+            self.assertEqual(len(self.w.events()), 1)
+            self.assertEqual(self.w.events()[0]['action']['points'][-1], [.2, .9])
+            self.w.pending = {'id': 'approval'}
+            for data in [request, dict(request, phase='key', key='GoHome')]:
+                with self.assertRaises(ValueError): self.w.live_input(data)
+            self.w.pending = None
+            self.w.live_input(request)
+            with patch.object(self.w, '_spawn'):
+                self.w.start_ai('현재 화면 확인', True)
+            self.assertIsNone(self.w.pointer)
+            connection.mouse.assert_called_with(.2, .3, False)
+            self.w.live_input(request)
+            pointer = self.w.pointer
+            self.w.load('test')
+            self.assertIsNone(self.w.pointer)
+            self.w.live_input(request)
+            self.w.pointer_timeout(pointer)  # Old watchdog must not release a newer touch.
+            self.assertIsNotNone(self.w.pointer)
+            self.w.pointer['updated'] -= 4
+            self.w.pointer_timeout(self.w.pointer)
+            self.assertIsNone(self.w.pointer)
+            self.w.live_input(dict(request, phase='key', key='a'))
+            self.assertEqual(self.w.events()[-1]['action']['text'], '[입력 내용 기록 안 함]')
+            self.w.live_input(request)
+            connection.mouse.side_effect = ValueError('연결 끊김')
+            with self.assertRaises(ValueError): self.w.release_pointer()
+            self.assertIsNone(self.w.pointer)
+            self.assertTrue(self.w.events()[-1]['missing'])
+
+    def test_stream_frames_and_disconnected_touch_release(self):
+        import http.client
+        import struct
+        import time
+        from types import SimpleNamespace
+        stopped = threading.Event()
+        class Frames:
+            def __iter__(self):
+                yield SimpleNamespace(format=SimpleNamespace(width=432, height=960), image=b'png-test')
+                stopped.wait(5)
+            def cancel(self): stopped.set()
+        connection = Mock(size=(1080, 2400))
+        connection.frames.return_value = Frames()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server.workbench = self.w
+        server.csrf = 'synthetic'
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        client = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+        with patch('server.emulator.Connection', return_value=connection):
+            client.request('POST', '/api/stream', json.dumps({'session':'test','viewer':'viewer'}),
+                           {'Content-Type':'application/json','X-Plipa-CSRF':'synthetic'})
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            length = struct.unpack('!I', response.read(4))[0]
+            self.assertEqual(response.read(length), b'png-test')
+            self.assertEqual(response.read(4), b'\x00'*4)
+            self.w.live_input({'session':'test','viewer':'viewer','phase':'down','x':.5,'y':.5})
+            response.close();client.close()
+            deadline = time.monotonic()+4
+            while self.w.viewers and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertFalse(self.w.viewers)
+            self.assertIsNone(self.w.pointer)
+            connection.mouse.assert_called_with(.5, .5, False)
+            connection.close.assert_called_once()
 
     def test_http_origin_and_csrf(self):
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
