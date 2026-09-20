@@ -11,6 +11,7 @@ import zipfile
 
 import device
 import emulator
+import ai
 from server import Handler, ThreadingHTTPServer, Workbench, save_json
 
 
@@ -68,6 +69,32 @@ class PlipaTest(unittest.TestCase):
             self.w.cancel()
             self.assertIsNone(self.w.pending)
             self.assertTrue(self.w.stop.is_set())
+
+    def test_ai_request_uses_validated_model_and_reasoning(self):
+        with patch.object(self.w, '_spawn'):
+            self.w.start_ai('현재 화면 확인', True, model='gpt-5.6-luna', reasoning_effort='low')
+        self.assertEqual((self.w.ai_model, self.w.ai_reasoning_effort), ('gpt-5.6-luna', 'low'))
+        self.assertEqual((self.w.events()[-1]['ai_model'], self.w.events()[-1]['ai_reasoning_effort']),
+                         ('gpt-5.6-luna', 'low'))
+        with patch('device.tree', return_value=self.nodes), \
+             patch('ai.plan', return_value={'kind': 'done', 'target': 0, 'text': '', 'message': '완료'}) as planner:
+            self.w._loop()
+        self.assertEqual(planner.call_args.kwargs['model'], 'gpt-5.6-luna')
+        self.assertEqual(planner.call_args.kwargs['reasoning_effort'], 'low')
+        for model, effort in [('unknown', 'medium'), ('gpt-5.6-terra', 'max')]:
+            with self.assertRaises(ValueError):
+                self.w.start_ai('현재 화면 확인', True, model=model, reasoning_effort=effort)
+
+    def test_codex_arguments_default_to_terra_and_medium(self):
+        process = Mock()
+        process.poll.return_value = 0
+        process.returncode = 1
+        with patch('ai.shutil.which', return_value='codex'), patch('ai.subprocess.Popen', return_value=process) as popen:
+            with self.assertRaises(ValueError):
+                ai.plan('확인', [], [], threading.Event())
+        args = popen.call_args.args[0]
+        self.assertEqual(args[args.index('-m') + 1], 'gpt-5.6-terra')
+        self.assertIn('model_reasoning_effort="medium"', args)
 
     def test_record_recovery_after_disconnect(self):
         self.w.event('note', '기존 관찰')

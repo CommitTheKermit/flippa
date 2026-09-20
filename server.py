@@ -60,6 +60,8 @@ class Workbench:
         self.pending = None
         self.current = None
         self.goal = ''
+        self.ai_model = ai.DEFAULT_MODEL
+        self.ai_reasoning_effort = ai.DEFAULT_REASONING_EFFORT
         self.viewers = {}
         self.pointer = None
         self.user = user
@@ -325,7 +327,7 @@ class Workbench:
                     self.release_pointer(viewer)
                     raise
 
-    def start_ai(self, goal, consent, consent_logs=False):
+    def start_ai(self, goal, consent, consent_logs=False, model=None, reasoning_effort=None):
         with self.lock:
             self.session()
             if consent is not True:
@@ -336,9 +338,11 @@ class Workbench:
                 raise ValueError('소유자가 AI 사용을 제한했습니다.')
             self.release_pointer()
             self.goal = text(goal, 3000)
+            self.ai_model, self.ai_reasoning_effort = ai.settings(model, reasoning_effort)
             self.steps_left = self.step_limit
             self.consent_logs = consent_logs is True
-            self.event('user', self.goal, external_ai_consent=True, logs_ai_consent=self.consent_logs)
+            self.event('user', self.goal, external_ai_consent=True, logs_ai_consent=self.consent_logs,
+                       ai_model=self.ai_model, ai_reasoning_effort=self.ai_reasoning_effort)
             self._spawn()
 
     def _spawn(self):
@@ -368,7 +372,9 @@ class Workbench:
             if self.stop.is_set():
                 return
             self.steps_left -= 1
-            action = ai.plan(self.goal, nodes, history, self.stop, evidence=evidence, logs_allowed=self.consent_logs)
+            action = ai.plan(self.goal, nodes, history, self.stop, evidence=evidence,
+                             logs_allowed=self.consent_logs, model=self.ai_model,
+                             reasoning_effort=self.ai_reasoning_effort)
             with self.lock:
                 if self.stop.is_set():
                     return
@@ -694,7 +700,8 @@ class Handler(BaseHTTPRequestHandler):
                     elif path == '/api/debug':
                         return self.reply({'result': w.debug.read(data.get('tool'))})
                     elif path == '/api/chat':
-                        w.start_ai(data.get('goal'), data.get('consent'), data.get('consent_logs'))
+                        w.start_ai(data.get('goal'), data.get('consent'), data.get('consent_logs'),
+                                   data.get('model'), data.get('reasoning_effort'))
                     elif path == '/api/note':
                         w.event('note', text(data.get('message')), fact=False)
                     elif path == '/api/export':

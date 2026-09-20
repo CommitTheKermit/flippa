@@ -47,7 +47,9 @@ async function refresh(){
   }
   $('approval').hidden=!state.pending;
   if(state.pending){const a=state.pending.action;$('approvalText').textContent=a.message+'\n'+JSON.stringify({조작:a.kind,대상:a.target,입력:a.text});}
-  $('send').disabled=!!(state.running||state.pending||!state.ai_allowed||!state.session);$('approve').disabled=state.running;
+  const aiBusy=!!(state.running||state.pending);
+  $('send').disabled=!!(aiBusy||!state.ai_allowed||!state.session);$('approve').disabled=state.running;
+  $('aiModel').disabled=aiBusy;$('aiReasoning').disabled=aiBusy;
   $('aiState').textContent=!state.ai_allowed?'소유자가 AI 사용을 중지했습니다.':state.queue_position?'다른 요청 종료 후 실행 · 대기 '+state.queue_position+'번째':state.running?'확인 중 · 남은 호출 '+state.steps_left+'회':state.pending?'사용자 확인을 기다립니다.':'요청당 최대 '+state.step_limit+'회 · 이미지 전송 없음';
 }
 async function refreshDevices(){const result=await api('devices');const old=$('devices').value;$('devices').replaceChildren();for(const d of result.devices)$('devices').add(new Option(d.label+' · '+d.state,d.serial));if(!result.devices.length)$('devices').add(new Option('연결된 기기 없음',''));if(old)$('devices').value=old;$('avds').replaceChildren(...result.avds.map(a=>new Option(a,a)));}
@@ -94,7 +96,7 @@ $('launch').onclick=()=>task(()=>api('launch',{}));
 $('boot').onclick=()=>task(async()=>{await api('boot',{name:$('avds').value});notice('에뮬레이터를 시작했습니다. 부팅 후 연결 목록을 새로고침하세요.');$('help').close();});
 $('capture').onclick=()=>task(async()=>{const b=$('capture');b.disabled=true;try{await api('capture',{screen:$('includeScreen').checked});notice('수집 결과를 타임라인에 남겼습니다. 누락 여부를 확인하세요.');}finally{b.disabled=false;}});
 $('noteForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('note',{message:$('note').value});$('note').value='';});};
-$('chatForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('chat',{goal:$('goal').value,consent:$('consent').checked,consent_logs:$('consentLogs').checked});$('goal').value='';notice('AI 테스트를 요청했습니다. 다른 요청이 실행 중이면 순서대로 시작합니다.');});};
+$('chatForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('chat',{goal:$('goal').value,consent:$('consent').checked,consent_logs:$('consentLogs').checked,model:$('aiModel').value,reasoning_effort:$('aiReasoning').value});$('goal').value='';notice('AI 테스트를 요청했습니다. 다른 요청이 실행 중이면 순서대로 시작합니다.');});};
 $('example').onclick=()=>{$('goal').value='현재 화면을 살펴보고 테스트할 항목을 알려줘';$('goal').focus();};
 $('stop').onclick=()=>task(()=>api('stop',{}));
 $('approve').onclick=()=>task(()=>api('approve',{id:state.pending?.id,approved:true}));

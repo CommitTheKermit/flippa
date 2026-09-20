@@ -2,4 +2,4 @@
 
 #attachmentText{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;max-height:60vh;overflow:auto}#attachmentImage{max-width:100%;max-height:65vh;display:block;margin:16px auto}.event button{font-size:10px;padding:4px 7px;margin:4px 4px 0 0}
 
-.debug-tools{margin-bottom:12px}.member{justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--line)}.member span{overflow-wrap:anywhere}#identity{font-size:14px}#memberList{font-size:14px}
+.debug-tools{margin-bottom:12px}.member{justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--line)}.member span{overflow-wrap:anywhere}#identity{font-size:14px}#memberList{font-size:14px}.ai-config{display:grid;grid-template-columns:1fr 1fr;gap:8px}.ai-config select{padding:7px 9px}
