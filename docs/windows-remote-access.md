@@ -17,6 +17,7 @@ tailscale serve status
 Expected state:
 
 - Tailscale and sshd are running with automatic startup.
+- Tailscale unattended mode is enabled so the node connects before user logon.
 - Tailscale Serve proxies HTTPS to `http://127.0.0.1:4317`.
 - Plipa starts 60 seconds after boot and at user logon with S4U.
 - Duplicate Plipa instances are ignored.

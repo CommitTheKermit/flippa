@@ -39,6 +39,10 @@ def stream_size():
     return min(1920, max(240, size))
 
 
+def screenshot_size(image):
+    return image.format.width or image.width, image.format.height or image.height
+
+
 class Connection:
     def __init__(self, serial):
         if not isinstance(serial, str) or not re.fullmatch(r'emulator-\d+', serial):
@@ -62,7 +66,7 @@ class Connection:
         self.auth = [('authorization', 'Bearer ' + settings['grpc.token'])]
         try:
             shot = self.call('getScreenshot', pb.ImageFormat(format=pb.ImageFormat.PNG), pb.Image)
-            self.size = (shot.format.width, shot.format.height)
+            self.size = screenshot_size(shot)
             if not all(self.size):
                 raise ValueError('에뮬레이터 화면 크기를 확인하지 못했습니다.')
         except Exception:

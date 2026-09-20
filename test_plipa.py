@@ -124,6 +124,12 @@ class PlipaTest(unittest.TestCase):
              patch.dict('emulator.os.environ', {'LOCALAPPDATA': r'C:\Users\test\AppData\Local'}, clear=True):
             self.assertEqual(emulator.discovery_folders(),
                              [Path(r'C:\Users\test\AppData\Local\Temp\avd\running')])
+        legacy = emulator.pb.Image(width=720, height=1280)
+        self.assertEqual(emulator.screenshot_size(legacy), (720, 1280))
+        current = emulator.pb.Image(width=720, height=1280,
+                                    format=emulator.pb.ImageFormat(width=360, height=640))
+        self.assertEqual(emulator.screenshot_size(current), (360, 640))
+
 
     def test_live_input_ownership_approval_and_release(self):
         connection = Mock()
