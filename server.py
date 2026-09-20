@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 import secrets
 import threading
 import time
@@ -22,7 +23,11 @@ from access import AIGate, configured_users
 from debug_tools import DebugTools
 
 ROOT = Path(__file__).resolve().parent
-DATA = Path(os.environ.get('PLIPA_DATA', Path.home() / 'Library/Application Support/Plipa'))
+if sys.platform == 'win32':
+    DEFAULT_DATA = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'Plipa'
+else:
+    DEFAULT_DATA = Path.home() / 'Library/Application Support/Plipa'
+DATA = Path(os.environ.get('PLIPA_DATA', DEFAULT_DATA))
 
 
 def now():
@@ -31,7 +36,7 @@ def now():
 
 def save_json(path, value):
     tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2))
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
     tmp.replace(path)
 
 
@@ -61,10 +66,58 @@ class Workbench:
         self.step_limit = max(1, min(12, int(os.environ.get('PLIPA_AI_STEPS', '6'))))
         self.consent_logs = False
         self.debug = DebugTools(self.session, self.directory, self.event)
+        self.managed_avds = set()
+        self.last_emulator_activity = time.monotonic()
+        self.idle_monitor = None
+        self.shutdown = threading.Event()
 
     def require_device(self, serial):
         if self.allowed_devices is not None and serial not in self.allowed_devices:
             raise ValueError('본인에게 배정된 기기만 사용할 수 있습니다.')
+
+    def emulator_activity(self):
+        self.last_emulator_activity = time.monotonic()
+
+    def manage_emulator(self, name):
+        with self.lock:
+            self.managed_avds.add(name)
+            self.emulator_activity()
+            if not self.idle_monitor or not self.idle_monitor.is_alive():
+                self.idle_monitor = threading.Thread(target=self._idle_emulators, daemon=True)
+                self.idle_monitor.start()
+
+    def _idle_emulators(self):
+        try:
+            idle_seconds = max(60, int(os.environ.get('PLIPA_EMULATOR_IDLE_MINUTES', '20')) * 60)
+        except ValueError:
+            idle_seconds = 1200
+        while not self.shutdown.wait(30):
+            with self.lock:
+                if not self.managed_avds:
+                    return
+                if self.viewers or self.running or self.pending:
+                    self.emulator_activity()
+                    continue
+                if time.monotonic() - self.last_emulator_activity < idle_seconds:
+                    continue
+                managed = set(self.managed_avds)
+            stopped = set()
+            for entry in device.devices():
+                try:
+                    name = device.avd_name(entry['serial'])
+                    if name in managed:
+                        device.stop(entry['serial'])
+                        stopped.add(name)
+                except ValueError:
+                    continue
+            with self.lock:
+                # Missing names either failed to boot or were already stopped.
+                self.managed_avds.difference_update(managed)
+                if not self.managed_avds:
+                    return
+
+    def close(self):
+        self.shutdown.set()
 
     def session(self):
         if not self.current:
@@ -79,7 +132,7 @@ class Workbench:
         if not path.exists():
             return []
         events = []
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding='utf-8').splitlines():
             try:
                 events.append(json.loads(line))
             except ValueError:
@@ -106,7 +159,7 @@ class Workbench:
             sessions = []
             for path in sorted(self.root.glob('*/session.json'), reverse=True):
                 try:
-                    sessions.append(json.loads(path.read_text()))
+                    sessions.append(json.loads(path.read_text(encoding='utf-8')))
                 except (ValueError, OSError):
                     continue
             return {'session': self.current, 'sessions': sessions, 'running': self.running,
@@ -118,6 +171,7 @@ class Workbench:
     def start(self, serial, package, title):
         with self.lock:
             self.require_device(serial)
+            self.emulator_activity()
             if self.running or self.pending:
                 raise ValueError('AI를 중지한 뒤 새 테스트를 시작하세요.')
             if not any(d['serial'] == serial and d['state'] == 'device' for d in device.devices()):
@@ -144,7 +198,7 @@ class Workbench:
             path = self.root/sid/'session.json'
             if not path.is_file():
                 raise ValueError('기록이 없습니다.')
-            restored = json.loads(path.read_text())
+            restored = json.loads(path.read_text(encoding='utf-8'))
             self.require_device(restored['serial'])
             self.release_pointer()
             self.current = restored
@@ -210,6 +264,7 @@ class Workbench:
 
     def live_input(self, data):
         with self.lock:
+            self.emulator_activity()
             viewer = data.get('viewer')
             if not isinstance(viewer, str) or viewer not in self.viewers:
                 raise ValueError('화면 연결을 기다린 뒤 조작하세요.')
@@ -456,7 +511,9 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def trusted(self):
-        origin = getattr(self.server, 'origin', None) or f'http://127.0.0.1:{self.server.server_port}'
+        origin = (getattr(self.server, 'origin', None)
+                  or getattr(self.server, 'public_origin', None)
+                  or f'http://127.0.0.1:{self.server.server_port}')
         return self.headers.get('Host') == urlsplit(origin).netloc and self.headers.get('Origin', origin) == origin
 
     def identify(self):
@@ -522,6 +579,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(viewer, str) or not device.re.fullmatch(r'[a-zA-Z0-9-]{1,64}', viewer):
             raise ValueError('잘못된 화면 연결 ID입니다.')
         with w.lock:
+            w.emulator_activity()
             sid = w.session()['id']
             if data.get('session') != sid or viewer in w.viewers:
                 raise ValueError('화면 연결을 다시 시작하세요.')
@@ -614,7 +672,7 @@ class Handler(BaseHTTPRequestHandler):
                     elif path == '/api/boot':
                         if self.role != 'owner':
                             raise ValueError('소유자가 에뮬레이터를 준비해야 합니다.')
-                        device.boot(data.get('name'))
+                        w.manage_emulator(device.boot(data.get('name')))
                     elif path == '/api/launch':
                         if w.running or w.pending:
                             raise ValueError('AI를 중지한 뒤 앱을 실행하세요.')
@@ -642,29 +700,40 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({'error': '처리하지 못했습니다. 기존 기록은 보존했습니다.'}, 500)
 
 
+def server_configuration(port):
+    users = configured_users()
+    socket_path = os.environ.get('PLIPA_SOCKET')
+    origin = os.environ.get('PLIPA_ORIGIN', f'http://127.0.0.1:{port}').rstrip('/')
+    parsed = urlsplit(origin)
+    if (parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.path
+            or parsed.query or parsed.fragment or parsed.username or parsed.password):
+        raise ValueError('PLIPA_ORIGIN은 경로가 없는 http 또는 https 주소여야 합니다.')
+    shared = os.environ.get('PLIPA_USERS') is not None
+    if shared:
+        if not socket_path or parsed.scheme != 'https':
+            raise ValueError('공동 사용은 PLIPA_SOCKET과 HTTPS PLIPA_ORIGIN, 인증 프록시가 필요합니다.')
+    elif socket_path:
+        raise ValueError('PLIPA_SOCKET은 공동 사용 설정에서만 사용하세요.')
+    return users, socket_path, origin, shared
+
+
 def main():
     os.umask(0o077)
     port = int(os.environ.get('PLIPA_PORT', '4317'))
-    users = configured_users()
-    socket_path = os.environ.get('PLIPA_SOCKET')
-    origin = os.environ.get('PLIPA_ORIGIN', f'http://127.0.0.1:{port}')
-    if os.environ.get('PLIPA_USERS') is not None:
-        parsed = urlsplit(origin)
-        if not socket_path or parsed.scheme != 'https' or not parsed.netloc or parsed.path or parsed.query or parsed.fragment or parsed.username:
-            raise ValueError('공동 사용은 PLIPA_SOCKET과 HTTPS PLIPA_ORIGIN, 인증 프록시가 필요합니다.')
+    users, socket_path, origin, shared = server_configuration(port)
+    if shared:
         server = PrivateHTTPServer(socket_path, Handler)
         os.chmod(socket_path, 0o600)
     else:
-        if socket_path or origin != f'http://127.0.0.1:{port}':
-            raise ValueError('원격 접속 전 PLIPA_USERS로 사용자를 등록하세요.')
         server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.origin = origin
+    server.public_origin = origin
     server.workspaces = Workspaces(DATA, users)
     print(f'플리파 {origin}', flush=True)
     import sys
     if '--open' in sys.argv and not socket_path:
         import webbrowser
-        threading.Timer(.3, lambda: webbrowser.open(f'http://127.0.0.1:{port}')).start()
+        threading.Timer(.3, lambda: webbrowser.open(origin)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -675,6 +744,8 @@ def main():
             for w in server.workspaces.boards.values():
                 w.release_pointer()
         finally:
+            for w in server.workspaces.boards.values():
+                w.close()
             server.server_close()
             if socket_path:
                 Path(socket_path).unlink(missing_ok=True)

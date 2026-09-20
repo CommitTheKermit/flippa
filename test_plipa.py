@@ -10,6 +10,7 @@ import urllib.error
 import zipfile
 
 import device
+import emulator
 from server import Handler, ThreadingHTTPServer, Workbench, save_json
 
 
@@ -76,7 +77,7 @@ class PlipaTest(unittest.TestCase):
         restored.load('test')
         self.assertEqual(restored.events()[0]['message'], '기존 관찰')
         self.assertEqual(len(restored.events()[-1]['missing']), 2)
-        with (restored.directory()/'timeline.jsonl').open('a') as out:
+        with (restored.directory()/'timeline.jsonl').open('a', encoding='utf-8') as out:
             out.write('{"interrupted":')
         restored.event('note', '복구 뒤 새 기록')
         self.assertEqual(restored.events()[-1]['message'], '복구 뒤 새 기록')
@@ -85,7 +86,7 @@ class PlipaTest(unittest.TestCase):
         original = self.w.event('capture', '선택한 구간')
         self.w.event('note', '선택하지 않은 민감 메모')
         (self.w.directory()/'sample.png').write_bytes(b'example image')
-        (self.w.directory()/'sample.txt').write_text('example log')
+        (self.w.directory()/'sample.txt').write_text('example log', encoding='utf-8')
         attachment = self.w.event('evidence', '증거', step_id=original['id'], attachments=['sample.png','sample.txt'])
         data = {'ids':[attachment['id']], 'title':'문제','steps':'재현','expected':'기대','actual':'실제','logs':True}
         archive = zipfile.ZipFile(io.BytesIO(self.w.export(data)))
@@ -102,7 +103,34 @@ class PlipaTest(unittest.TestCase):
                        'Authorization: Bearer SYNTHETIC_VALUE', '{"api_key": "SYNTHETIC_VALUE"}']:
             self.assertNotIn('SYNTHETIC_VALUE', device.redact(sample))
         self.w.event('note', 'password="SYNTHETIC_VALUE"')
-        self.assertNotIn('SYNTHETIC_VALUE', (self.w.directory()/'timeline.jsonl').read_text())
+        self.assertNotIn('SYNTHETIC_VALUE', (self.w.directory()/'timeline.jsonl').read_text(encoding='utf-8'))
+
+    def test_low_resource_emulator_launch(self):
+        process = Mock()
+        with patch('device.avds', return_value=['Flippa_API_33']), \
+             patch('device.subprocess.Popen', return_value=process) as popen, \
+             patch('device.threading.Thread') as thread:
+            self.assertEqual(device.boot('Flippa_API_33'), 'Flippa_API_33')
+        args = popen.call_args.args[0]
+        for expected in ('-no-window', '-no-audio', '-no-boot-anim', '-grpc-use-token'):
+            self.assertIn(expected, args)
+        self.assertEqual(args[args.index('-cores') + 1], '2')
+        self.assertEqual(args[args.index('-memory') + 1], '2048')
+        thread.return_value.start.assert_called_once()
+
+    def test_stream_defaults_to_720_and_windows_discovery(self):
+        with patch.dict('emulator.os.environ', {}, clear=True):
+            self.assertEqual(emulator.stream_size(), 720)
+        with patch('emulator.sys.platform', 'win32'), \
+             patch.dict('emulator.os.environ', {'LOCALAPPDATA': r'C:\Users\test\AppData\Local'}, clear=True):
+            self.assertEqual(emulator.discovery_folders(),
+                             [Path(r'C:\Users\test\AppData\Local\Temp\avd\running')])
+        legacy = emulator.pb.Image(width=720, height=1280)
+        self.assertEqual(emulator.screenshot_size(legacy), (720, 1280))
+        current = emulator.pb.Image(width=720, height=1280,
+                                    format=emulator.pb.ImageFormat(width=360, height=640))
+        self.assertEqual(emulator.screenshot_size(current), (360, 640))
+
 
     def test_live_input_ownership_approval_and_release(self):
         connection = Mock()
@@ -214,6 +242,14 @@ class PlipaTest(unittest.TestCase):
         with urllib.request.urlopen(req) as response:
             self.assertEqual(response.status, 200)
         self.assertEqual(len(self.w.events()),1)
+
+        server.public_origin = 'https://vivobook.example.ts.net'
+        req = urllib.request.Request(url+'/api/state', headers={
+            'Host': 'vivobook.example.ts.net',
+            'Origin': 'https://vivobook.example.ts.net',
+        })
+        with urllib.request.urlopen(req) as response:
+            self.assertEqual(response.status, 200)
 
 
 if __name__ == '__main__':

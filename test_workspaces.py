@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from access import AIGate, configured_users
-from server import Handler, PrivateHTTPServer, Workspaces, save_json
+from server import Handler, PrivateHTTPServer, Workspaces, save_json, server_configuration
 
 
 class UnixClient(http.client.HTTPConnection):
@@ -176,6 +176,21 @@ class SharedWorkbenchTest(unittest.TestCase):
         with patch.dict(os.environ, {'PLIPA_USERS': json.dumps(self.users)}):
             with self.assertRaises(ValueError):
                 configured_users()
+
+    def test_server_configuration_keeps_single_user_remote_and_shared_auth_separate(self):
+        with patch.dict(os.environ, {'PLIPA_ORIGIN': 'https://plipa.test'}, clear=True):
+            users, socket_path, origin, shared = server_configuration(4317)
+        self.assertEqual(users, {'local': {'role': 'owner', 'devices': None}})
+        self.assertIsNone(socket_path)
+        self.assertEqual(origin, 'https://plipa.test')
+        self.assertFalse(shared)
+
+        with patch.dict(os.environ, {
+                'PLIPA_USERS': json.dumps(self.users),
+                'PLIPA_ORIGIN': 'https://plipa.test',
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, '인증 프록시'):
+                server_configuration(4317)
 
     def test_waiting_request_runs_only_after_current_request_finishes(self):
         gate = AIGate()
