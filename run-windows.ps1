@@ -6,6 +6,14 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
+$codexBin = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin'
+if (Test-Path -LiteralPath $codexBin -PathType Container) {
+    $pathEntries = @($env:Path -split ';')
+    if (-not ($pathEntries | Where-Object { $_.TrimEnd('\') -ieq $codexBin.TrimEnd('\') })) {
+        $env:Path = "$codexBin;$env:Path"
+    }
+}
+
 $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) {
     py -3 -m venv (Join-Path $PSScriptRoot '.venv')
