@@ -10,7 +10,45 @@ macOS의 로컬 Android 에뮬레이터에서 수동 테스트와 Codex 테스�
 ./플리파.command
 ```
 
+Windows에서는 PowerShell에서 다음을 실행한다.
+
+```powershell
+.\run-windows.ps1 -Open
+```
+
+Windows 기록은 기본적으로 `%LOCALAPPDATA%\Plipa`에 저장된다. `ANDROID_HOME` 또는
+`ANDROID_SDK_ROOT`가 없으면 `%LOCALAPPDATA%\Android\Sdk`에서 Android SDK를 찾는다.
+
+Windows에서는 플리파가 에뮬레이터를 창·오디오 없이 2코어/2GB RAM으로 실행하고,
+화면 스트림의 긴 변을 기본 720px로 제한한다. 플리파가 시작한 AVD는 화면 연결이나
+AI 작업이 20분 동안 없으면 Quick Boot 상태를 저장하며 종료한다. Android Studio는
+AVD 생성과 관리에만 필요하며 서버 운영 중에는 닫아도 된다. 다음 환경변수로 조정한다.
+
+| 환경변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `PLIPA_STREAM_SIZE` | `720` | 스트림 긴 변(px), 240~1920 |
+| `PLIPA_EMULATOR_CORES` | `2` | 에뮬레이터 CPU 코어, 1~4 |
+| `PLIPA_EMULATOR_MEMORY_MB` | `2048` | 에뮬레이터 RAM, 1024~4096MB |
+| `PLIPA_EMULATOR_IDLE_MINUTES` | `20` | 미사용 자동 종료 시간, 최소 1분 |
+| `PLIPA_EMULATOR_GPU` | `auto` | 그래픽 모드; 문제가 없으면 `auto` 유지 |
+
+최초 한 번은 관리자 PowerShell에서 다음을 실행하고, 물리적으로 PC에 접근할 수 있을 때
+재부팅한다. 스크립트 자체는 재부팅하지 않는다.
+
+```powershell
+.\enable-windows-emulator-acceleration.ps1
+```
+
 주소: http://127.0.0.1:4317
+
+다른 기기에서 사용할 때도 서버의 loopback 바인딩은 유지한다. 사설 Tailscale 네트워크의
+HTTPS 프록시를 사용할 경우에만 `PLIPA_ORIGIN`을 해당 장치의 정확한 HTTPS origin으로 설정한다.
+인터넷에 직접 포트를 열거나 Tailscale Funnel을 사용하지 않는다.
+
+Mac에서 Windows 서버에 SSH로 접속하고 운영하는 방법은
+[`docs/windows-remote-access.md`](docs/windows-remote-access.md)에 정리되어 있다.
+실제 구성 변경과 검증 기록은
+[`docs/windows-setup-worklog.md`](docs/windows-setup-worklog.md)에 정리되어 있다.
 
 Python 3.10 이상, Android SDK의 ADB와 Emulator, 생성한 AVD가 필요하다. AI는 설치·로그인한 Codex CLI를 사용한다. 첫 실행 시 전용 `.venv`에 `requirements.txt`의 gRPC/Protobuf 패키지를 설치한다. JavaScript 추가 패키지는 없다. 서버는 로컬 주소에만 바인딩한다. 웹 자산만 별도로 배포하면 기기 연결이 동작하지 않으므로 호스팅하지 않는다.
 

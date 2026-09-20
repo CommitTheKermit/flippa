@@ -28,7 +28,7 @@ All device inputs, including navigation, require human approval. Observations ru
     with tempfile.TemporaryDirectory(prefix='plipa-planner-') as folder:
         folder = Path(folder)
         schema = folder/'schema.json'
-        schema.write_text(json.dumps(SCHEMA))
+        schema.write_text(json.dumps(SCHEMA), encoding='utf-8')
         output = folder/'answer.json'
         args = ['codex', 'exec', '--ignore-user-config', '--ignore-rules', '--ephemeral',
                 '--skip-git-repo-check', '--sandbox', 'read-only', '-C', str(folder),
@@ -41,7 +41,8 @@ All device inputs, including navigation, require human approval. Observations ru
         if os.environ.get('PLIPA_MODEL'):
             args += ['-m', os.environ['PLIPA_MODEL']]
         args += ['-']
-        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, text=True, encoding='utf-8')
         proc.stdin.write(redact(prompt))
         proc.stdin.close()
         import time
@@ -58,7 +59,7 @@ All device inputs, including navigation, require human approval. Observations ru
         if proc.returncode or not output.exists():
             raise ValueError('Codex 응답 실패. 터미널에서 codex login status와 모델 이용 권한을 확인하세요.')
         try:
-            action = json.loads(output.read_text())
+            action = json.loads(output.read_text(encoding='utf-8'))
         except (ValueError, OSError):
             raise ValueError('AI 응답 형식이 올바르지 않습니다.') from None
         if (not isinstance(action, dict) or set(action) != set(SCHEMA['required'])

@@ -6,11 +6,15 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
+import time
 import xml.etree.ElementTree as ET
 
-SDK = Path(os.environ.get('ANDROID_HOME', Path.home() / 'Library/Android/sdk'))
-ADB = shutil.which('adb') or str(SDK / 'platform-tools/adb')
-EMULATOR = str(SDK / 'emulator/emulator')
+DEFAULT_SDK = ((Path(os.environ['LOCALAPPDATA']) if os.environ.get('LOCALAPPDATA') else Path.home()) / 'Android/Sdk'
+               if os.name == 'nt' else Path.home() / 'Library/Android/sdk')
+SDK = Path(os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT') or DEFAULT_SDK)
+ADB = shutil.which('adb') or str(SDK / 'platform-tools' / ('adb.exe' if os.name == 'nt' else 'adb'))
+EMULATOR = str(SDK / 'emulator' / ('emulator.exe' if os.name == 'nt' else 'emulator'))
 PACKAGE = 'com.chamsae.chaekchaek.integration'
 
 
@@ -52,10 +56,48 @@ def avds():
     return run([EMULATOR, '-list-avds']).strip().splitlines() if Path(EMULATOR).exists() else []
 
 
+def _number_setting(name, default, low, high):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return str(min(high, max(low, value)))
+
+
+def avd_name(serial):
+    lines = adb(serial, 'emu', 'avd', 'name').strip().splitlines()
+    return lines[0] if lines else ''
+
+
+def stop(serial):
+    adb(serial, 'emu', 'kill')
+
+
+def _optimize_when_ready(name):
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        try:
+            for entry in devices():
+                if entry['state'] == 'device' and avd_name(entry['serial']) == name:
+                    for setting in ('window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'):
+                        adb(entry['serial'], 'shell', 'settings', 'put', 'global', setting, '0')
+                    return
+        except ValueError:
+            pass
+        time.sleep(2)
+
+
 def boot(name):
     if name not in avds():
         raise ValueError('등록된 가상 기기를 선택하세요.')
-    subprocess.Popen([EMULATOR, '-avd', name, '-grpc-use-token'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    args = [EMULATOR, '-avd', name, '-no-window', '-no-audio', '-no-boot-anim',
+            '-gpu', os.environ.get('PLIPA_EMULATOR_GPU', 'auto'),
+            '-cores', _number_setting('PLIPA_EMULATOR_CORES', 2, 1, 4),
+            '-memory', _number_setting('PLIPA_EMULATOR_MEMORY_MB', 2048, 1024, 4096),
+            '-grpc-use-token']
+    subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    threading.Thread(target=_optimize_when_ready, args=(name,), daemon=True).start()
+    return name
 
 
 def screenshot(serial):
