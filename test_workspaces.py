@@ -66,6 +66,7 @@ class SharedWorkbenchTest(unittest.TestCase):
         client.close()
         return status, json.loads(payload)
 
+    @unittest.skipUnless(PrivateHTTPServer.supported, 'Unix socket server unavailable')
     def test_identity_csrf_record_and_device_isolation(self):
         self.start_http()
         self.owner.event('note', 'owner-only')
@@ -100,6 +101,7 @@ class SharedWorkbenchTest(unittest.TestCase):
         self.assertFalse(restored.boards['tester'].running)
         self.assertEqual(restored.boards['tester'].events()[0]['message'], 'tester-only')
 
+    @unittest.skipUnless(PrivateHTTPServer.supported, 'Unix socket server unavailable')
     def test_people_and_ai_read_same_debug_evidence_with_log_consent(self):
         self.start_http()
         with patch('device.logs', return_value='app log sample') as logs, patch('device.tree', return_value=self.nodes):

@@ -18,7 +18,10 @@ import emulator
 import math
 import queue
 import struct
-from socketserver import ThreadingUnixStreamServer
+try:
+    from socketserver import ThreadingUnixStreamServer
+except ImportError:
+    ThreadingUnixStreamServer = None
 from access import AIGate, configured_users
 from debug_tools import DebugTools
 
@@ -486,8 +489,13 @@ class Workspaces:
                 w.cancel()
 
 
-class PrivateHTTPServer(ThreadingUnixStreamServer):
-    daemon_threads = True
+if ThreadingUnixStreamServer is not None:
+    class PrivateHTTPServer(ThreadingUnixStreamServer):
+        daemon_threads = True
+        supported = True
+else:
+    class PrivateHTTPServer:
+        supported = False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -712,6 +720,8 @@ def server_configuration(port):
     if shared:
         if not socket_path or parsed.scheme != 'https':
             raise ValueError('공동 사용은 PLIPA_SOCKET과 HTTPS PLIPA_ORIGIN, 인증 프록시가 필요합니다.')
+        if not PrivateHTTPServer.supported:
+            raise ValueError('이 운영체제에서는 인증 프록시용 Unix 소켓 공동 사용을 지원하지 않습니다.')
     elif socket_path:
         raise ValueError('PLIPA_SOCKET은 공동 사용 설정에서만 사용하세요.')
     return users, socket_path, origin, shared
