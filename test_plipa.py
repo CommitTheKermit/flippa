@@ -59,6 +59,7 @@ class PlipaTest(unittest.TestCase):
         with patch('device.tree', return_value=self.nodes), patch('ai.plan', return_value=self.action), patch('device.perform') as perform:
             self.w.goal = '삭제를 테스트'
             self.w.running = True
+            self.w.steps_left = self.w.step_limit
             self.w._loop()
             self.assertIsNotNone(self.w.pending)
             self.assertFalse(self.w.running)

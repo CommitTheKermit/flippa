@@ -1,4 +1,4 @@
-"""플리파: single-user loopback QA workbench, local emulator streaming."""
+"""플리파: 개인 서버의 사용자별 Android 디버깅·QA 작업실."""
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -17,6 +17,9 @@ import emulator
 import math
 import queue
 import struct
+from socketserver import ThreadingUnixStreamServer
+from access import AIGate, configured_users
+from debug_tools import DebugTools
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get('PLIPA_DATA', Path.home() / 'Library/Application Support/Plipa'))
@@ -39,7 +42,7 @@ def text(value, limit=5000):
 
 
 class Workbench:
-    def __init__(self, root=DATA):
+    def __init__(self, root=DATA, user='local', devices=None, ai_gate=None):
         self.root = root
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = threading.RLock()
@@ -51,6 +54,17 @@ class Workbench:
         self.goal = ''
         self.viewers = {}
         self.pointer = None
+        self.user = user
+        self.allowed_devices = devices
+        self.ai_gate = ai_gate or AIGate()
+        self.steps_left = 0
+        self.step_limit = max(1, min(12, int(os.environ.get('PLIPA_AI_STEPS', '6'))))
+        self.consent_logs = False
+        self.debug = DebugTools(self.session, self.directory, self.event)
+
+    def require_device(self, serial):
+        if self.allowed_devices is not None and serial not in self.allowed_devices:
+            raise ValueError('본인에게 배정된 기기만 사용할 수 있습니다.')
 
     def session(self):
         if not self.current:
@@ -76,7 +90,7 @@ class Workbench:
     def event(self, kind, message, **extra):
         with self.lock:
             entry = {'id': uuid.uuid4().hex[:12], 'time': now(), 'kind': kind,
-                     'message': device.redact(message), **extra}
+                     'message': device.redact(message), **extra, 'user': self.user}
             with (self.directory()/'timeline.jsonl').open('ab+') as out:
                 if out.tell():
                     out.seek(-1, 2)
@@ -96,22 +110,27 @@ class Workbench:
                 except (ValueError, OSError):
                     continue
             return {'session': self.current, 'sessions': sessions, 'running': self.running,
-                    'pending': self.pending, 'events': self.events() if self.current else []}
+                    'pending': self.pending, 'events': self.events() if self.current else [],
+                    'ai_allowed': self.ai_gate.allowed(self.user),
+                    'queue_position': self.ai_gate.position(self.user),
+                    'steps_left': self.steps_left, 'step_limit': self.step_limit}
 
     def start(self, serial, package, title):
         with self.lock:
+            self.require_device(serial)
             if self.running or self.pending:
                 raise ValueError('AI를 중지한 뒤 새 테스트를 시작하세요.')
             if not any(d['serial'] == serial and d['state'] == 'device' for d in device.devices()):
                 raise ValueError('연결된 에뮬레이터를 선택하세요.')
             if not isinstance(package, str) or not device.re.fullmatch(r'[a-zA-Z][\w]*(?:\.[\w]+)+', package):
                 raise ValueError('앱 패키지 이름을 확인하세요.')
+            title = text(title, 120)
             env = device.environment(serial, package)
             sid = datetime.now().strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
             folder = self.root/sid
             folder.mkdir(mode=0o700)
             self.release_pointer()
-            self.current = {'id': sid, 'title': text(title, 120), 'serial': serial,
+            self.current = {'id': sid, 'title': title, 'serial': serial,
                             'package': package, 'created': now(), 'environment': env}
             save_json(folder/'session.json', self.current)
             self.event('session', '테스트 시작', fact=True)
@@ -125,20 +144,19 @@ class Workbench:
             path = self.root/sid/'session.json'
             if not path.is_file():
                 raise ValueError('기록이 없습니다.')
+            restored = json.loads(path.read_text())
+            self.require_device(restored['serial'])
             self.release_pointer()
-            self.current = json.loads(path.read_text())
+            self.current = restored
 
     def capture(self, screen=False):
         s = self.session()
         entry = self.event('capture', '증거 수집', fact=True)
         attachments = []
         missing = []
-        for suffix, collect in [('ui.json', lambda: json.dumps(device.tree(s['serial']), ensure_ascii=False, indent=2).encode()),
-                                ('logcat.txt', lambda: device.logs(s['serial'], s['package']).encode())]:
-            name = entry['id'] + '-' + suffix
+        for kind in ('ui', 'logs'):
             try:
-                (self.directory()/name).write_bytes(collect())
-                attachments.append(name)
+                self.debug.read(kind, step=entry)
             except ValueError as exc:
                 missing.append(str(exc))
         if screen:
@@ -156,11 +174,7 @@ class Workbench:
             if self.running or self.pending:
                 raise ValueError('AI를 중지하거나 보류 조작을 취소한 뒤 직접 조작하세요.')
             self.release_pointer()
-            device.perform(self.session()['serial'], action)
-            safe_action = dict(action)
-            if action.get('kind') == 'text':
-                safe_action['text'] = '[입력 내용 기록 안 함]'
-            self.event('manual', '수동 조작', action=safe_action, fact=True)
+            self.debug.perform(action)
 
     def release_pointer(self, viewer=None):
         with self.lock:
@@ -253,16 +267,20 @@ class Workbench:
                     self.release_pointer(viewer)
                     raise
 
-    def start_ai(self, goal, consent):
+    def start_ai(self, goal, consent, consent_logs=False):
         with self.lock:
             self.session()
             if consent is not True:
                 raise ValueError('AI에 현재 화면 텍스트를 전송하는 데 동의해야 합니다.')
             if self.running or self.pending:
                 raise ValueError('진행 중인 AI 테스트가 있습니다.')
+            if not self.ai_gate.allowed(self.user):
+                raise ValueError('소유자가 AI 사용을 제한했습니다.')
             self.release_pointer()
             self.goal = text(goal, 3000)
-            self.event('user', self.goal, external_ai_consent=True)
+            self.steps_left = self.step_limit
+            self.consent_logs = consent_logs is True
+            self.event('user', self.goal, external_ai_consent=True, logs_ai_consent=self.consent_logs)
             self._spawn()
 
     def _spawn(self):
@@ -272,47 +290,57 @@ class Workbench:
 
     def _loop(self):
         try:
-            for _ in range(12):
-                if self.stop.is_set():
-                    break
-                with self.operation:
-                    nodes = device.tree(self.session()['serial'])
-                history = [{'kind': e['kind'], 'message': e['message'], 'action': e.get('action')}
-                           for e in self.events() if e['kind'] in ('user', 'ai', 'action', 'error')]
-                action = ai.plan(self.goal, nodes, history, self.stop)
-                with self.lock:
-                    if self.stop.is_set():
-                        break
-                    self.event('ai', action['message'], action=action, fact=False)
-                    if action['kind'] == 'done':
-                        break
-                    if not device.auto_allowed(action):
-                        self.pending = {'id': uuid.uuid4().hex, 'action': action, 'nodes': nodes, 'created': now()}
-                        break
-                with self.operation:
-                    with self.lock:
-                        if self.stop.is_set():
-                            break
-                        fresh = device.tree(self.session()['serial'])
-                        if action['kind'] == 'tap' and fresh != nodes:
-                            raise ValueError('화면이 바뀌어 자동 탐색을 중단했습니다. 다시 지시하세요.')
-                        device.perform(self.session()['serial'], action, fresh)
-                        self.event('action', 'AI 조작 실행', action=action, fact=True)
-                if self.stop.wait(1):
-                    break
-            else:
-                self.event('system', '12단계에 도달해 멈췄습니다. 화면 확인 후 다음 지시를 입력하세요.')
+            with self.ai_gate.slot(self.user, self.stop):
+                self._run_ai()
         except Exception as exc:
             self.event('error', str(exc) if isinstance(exc, ValueError) else 'AI 실행 중 오류가 발생했습니다. 기록은 보존했습니다.')
         finally:
             with self.lock:
                 self.running = False
 
+    def _run_ai(self):
+        evidence = None
+        while self.steps_left > 0:
+            if self.stop.is_set():
+                return
+            with self.operation:
+                nodes = self.debug.read('ui', actor='ai')
+            history = [{'kind': e['kind'], 'message': e['message'], 'action': e.get('action')}
+                       for e in self.events() if e['kind'] in ('user', 'ai', 'action', 'error')]
+            if self.stop.is_set():
+                return
+            self.steps_left -= 1
+            action = ai.plan(self.goal, nodes, history, self.stop, evidence=evidence, logs_allowed=self.consent_logs)
+            with self.lock:
+                if self.stop.is_set():
+                    return
+                self.event('ai', action['message'], action=action, fact=False)
+                if action['kind'] == 'done':
+                    return
+                if action['kind'] not in ('logs', 'environment') and not device.auto_allowed(action):
+                    self.pending = {'id': uuid.uuid4().hex, 'action': action, 'nodes': nodes, 'created': now()}
+                    return
+            if action['kind'] in ('logs', 'environment'):
+                if action['kind'] == 'logs' and not self.consent_logs:
+                    self.event('system', '앱 로그 AI 전송 동의가 없어 중지했습니다. 동의 후 다시 요청하세요.')
+                    return
+                with self.operation:
+                    if self.stop.is_set():
+                        return
+                    evidence = {'tool': action['kind'], 'result': self.debug.read(action['kind'], actor='ai')}
+                continue
+            # observe is a request for another observation, never an executed input.
+            if self.stop.wait(1):
+                return
+        self.event('system', '요청의 AI 호출 한도에 도달했습니다. 기록을 확인한 뒤 다시 지시하세요.')
+
     def approve(self, pending_id, approved):
         with self.operation, self.lock:
             pending = self.pending
             if not pending or pending_id != pending['id'] or self.running:
                 raise ValueError('현재 승인 대기 조작이 아닙니다.')
+            if approved is True and not self.ai_gate.allowed(self.user):
+                raise ValueError('소유자가 AI 사용을 제한했습니다.')
             self.pending = None
             if approved is not True:
                 self.event('system', '사용자가 조작을 취소했습니다.')
@@ -322,9 +350,11 @@ class Workbench:
                 self.event('system', '화면이 변경되어 승인을 폐기했습니다.')
                 raise ValueError('화면이 달라졌습니다. AI에 다시 지시하세요.')
             action = pending['action']
-            device.perform(self.session()['serial'], action, fresh)
-            self.event('action', '사용자 승인 후 실행', action=action, approved=True, fact=True)
-            self._spawn()
+            self.debug.perform(action, fresh, actor='ai', approved=True)
+            if self.steps_left > 0:
+                self._spawn()
+            else:
+                self.event('system', '승인한 조작을 실행했습니다. AI 호출 한도에 도달해 추가 판단은 실행하지 않았습니다.')
 
     def cancel(self):
         with self.lock:
@@ -374,6 +404,37 @@ class Workbench:
             return bundle.getvalue()
 
 
+class Workspaces:
+    def __init__(self, root, users):
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.users = users
+        self.gate = AIGate(root/'ai-access.json')
+        self.boards = {name: Workbench(root if spec['role'] == 'owner' else root/'users'/name,
+                       user=name, devices=spec['devices'], ai_gate=self.gate)
+                       for name, spec in users.items()}
+        self.csrf = {name: secrets.token_urlsafe(32) for name in users}
+
+    def members(self):
+        return [{'id': name, 'ai_allowed': self.gate.allowed(name), 'running': w.running,
+                 'pending': bool(w.pending), 'queue_position': self.gate.position(name)}
+                for name, w in self.boards.items()]
+
+    def control(self, actor, target, allowed):
+        if self.users[actor]['role'] != 'owner':
+            raise ValueError('소유자만 AI 사용을 관리할 수 있습니다.')
+        if target not in self.users or type(allowed) is not bool:
+            raise ValueError('사용자와 AI 허용 여부를 확인하세요.')
+        w = self.boards[target]
+        with w.lock:
+            self.gate.set_allowed(target, allowed)
+            if not allowed:
+                w.cancel()
+
+
+class PrivateHTTPServer(ThreadingUnixStreamServer):
+    daemon_threads = True
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # Request data may contain QA evidence. Never log it.
@@ -395,22 +456,48 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def trusted(self):
-        host = f'127.0.0.1:{self.server.server_port}'
-        return self.headers.get('Host') == host and self.headers.get('Origin', 'http://' + host) == 'http://' + host
+        origin = getattr(self.server, 'origin', None) or f'http://127.0.0.1:{self.server.server_port}'
+        return self.headers.get('Host') == urlsplit(origin).netloc and self.headers.get('Origin', origin) == origin
+
+    def identify(self):
+        registry = getattr(self.server, 'workspaces', None)
+        if registry is None:  # Isolated test harness and legacy loopback server.
+            self.workbench = self.server.workbench
+            self.csrf = self.server.csrf
+            self.user = 'local'
+            self.role = 'owner'
+            return True
+        # Shared mode accepts identity only through a 0600 Unix socket behind an authenticated proxy.
+        self.user = self.headers.get('X-Plipa-User') if isinstance(self.server, PrivateHTTPServer) else 'local'
+        if self.user not in registry.users:
+            self.reply({'error': '인증된 사용자로 접속하세요.'}, 403)
+            return False
+        self.role = registry.users[self.user]['role']
+        self.workbench = registry.boards[self.user]
+        self.csrf = registry.csrf[self.user]
+        return True
 
     def do_GET(self):
         if not self.trusted():
-            return self.reply({'error': '로컬 접속만 허용합니다.'}, 403)
+            return self.reply({'error': '등록한 주소로 접속하세요.'}, 403)
+        if not self.identify():
+            return
         path = urlsplit(self.path).path
         try:
             if path == '/api/state':
-                return self.reply({**self.server.workbench.state(), 'csrf': self.server.csrf})
+                registry = getattr(self.server, 'workspaces', None)
+                return self.reply({**self.workbench.state(), 'csrf': self.csrf,
+                    'user': self.user, 'role': self.role,
+                    'members': registry.members() if registry and self.role == 'owner' else []})
             if path == '/api/devices':
-                return self.reply({'devices': device.devices(), 'avds': device.avds()})
+                allowed = self.workbench.allowed_devices
+                return self.reply({'devices': [d for d in device.devices() if allowed is None or d['serial'] in allowed],
+                                   'avds': device.avds() if self.role == 'owner' else []})
             if path == '/api/screen':
-                return self.reply(device.screenshot(self.server.workbench.session()['serial']), mime='image/png')
+                with self.workbench.operation:
+                    return self.reply(device.screenshot(self.workbench.session()['serial']), mime='image/png')
             if path == '/api/attachment':
-                w = self.server.workbench
+                w = self.workbench
                 name = parse_qs(urlsplit(self.path).query).get('name', [''])[0]
                 with w.lock:
                     allowed = {n for e in w.events() for n in e.get('attachments', [])}
@@ -430,7 +517,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({'error': str(exc)}, 400)
 
     def stream(self, data):
-        w = self.server.workbench
+        w = self.workbench
         viewer = data.get('viewer')
         if not isinstance(viewer, str) or not device.re.fullmatch(r'[a-zA-Z0-9-]{1,64}', viewer):
             raise ValueError('잘못된 화면 연결 ID입니다.')
@@ -493,7 +580,11 @@ class Handler(BaseHTTPRequestHandler):
             worker.join(timeout=3)
 
     def do_POST(self):
-        if not self.trusted() or not secrets.compare_digest(self.headers.get('X-Plipa-CSRF', ''), self.server.csrf):
+        if not self.trusted():
+            return self.reply({'error': '접근이 거부됐습니다. 화면을 새로고침하세요.'}, 403)
+        if not self.identify():
+            return
+        if not secrets.compare_digest(self.headers.get('X-Plipa-CSRF', ''), self.csrf):
             return self.reply({'error': '접근이 거부됐습니다. 화면을 새로고침하세요.'}, 403)
         try:
             length = int(self.headers.get('Content-Length', '0'))
@@ -502,10 +593,11 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict):
                 raise ValueError('JSON 객체가 필요합니다.')
-            w = self.server.workbench
+            w = self.workbench
             path = urlsplit(self.path).path
-            # ponytail: one local user, serialize device operations; per-device queues for multiple users.
-            if path == '/api/stream':
+            if path == '/api/admin/ai':
+                self.server.workspaces.control(self.user, data.get('user'), data.get('allowed'))
+            elif path == '/api/stream':
                 return self.stream(data)
             elif path == '/api/input':
                 w.live_input(data)
@@ -520,20 +612,23 @@ class Handler(BaseHTTPRequestHandler):
                     elif path == '/api/load':
                         w.load(data.get('id'))
                     elif path == '/api/boot':
+                        if self.role != 'owner':
+                            raise ValueError('소유자가 에뮬레이터를 준비해야 합니다.')
                         device.boot(data.get('name'))
                     elif path == '/api/launch':
                         if w.running or w.pending:
                             raise ValueError('AI를 중지한 뒤 앱을 실행하세요.')
                         with w.lock:
                             w.release_pointer()
-                            device.launch(w.session()['serial'], w.session()['package'])
-                        w.event('manual', '대상 앱 실행', fact=True)
+                            w.debug.launch()
                     elif path == '/api/manual':
                         w.manual(data)
                     elif path == '/api/capture':
                         w.capture(data.get('screen') is True)
+                    elif path == '/api/debug':
+                        return self.reply({'result': w.debug.read(data.get('tool'))})
                     elif path == '/api/chat':
-                        w.start_ai(data.get('goal'), data.get('consent'))
+                        w.start_ai(data.get('goal'), data.get('consent'), data.get('consent_logs'))
                     elif path == '/api/note':
                         w.event('note', text(data.get('message')), fact=False)
                     elif path == '/api/export':
@@ -550,23 +645,39 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     os.umask(0o077)
     port = int(os.environ.get('PLIPA_PORT', '4317'))
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
-    server.csrf = secrets.token_urlsafe(32)
-    server.workbench = Workbench()
-    print(f'플리파 http://127.0.0.1:{port}', flush=True)
+    users = configured_users()
+    socket_path = os.environ.get('PLIPA_SOCKET')
+    origin = os.environ.get('PLIPA_ORIGIN', f'http://127.0.0.1:{port}')
+    if os.environ.get('PLIPA_USERS') is not None:
+        parsed = urlsplit(origin)
+        if not socket_path or parsed.scheme != 'https' or not parsed.netloc or parsed.path or parsed.query or parsed.fragment or parsed.username:
+            raise ValueError('공동 사용은 PLIPA_SOCKET과 HTTPS PLIPA_ORIGIN, 인증 프록시가 필요합니다.')
+        server = PrivateHTTPServer(socket_path, Handler)
+        os.chmod(socket_path, 0o600)
+    else:
+        if socket_path or origin != f'http://127.0.0.1:{port}':
+            raise ValueError('원격 접속 전 PLIPA_USERS로 사용자를 등록하세요.')
+        server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    server.origin = origin
+    server.workspaces = Workspaces(DATA, users)
+    print(f'플리파 {origin}', flush=True)
     import sys
-    if '--open' in sys.argv:
+    if '--open' in sys.argv and not socket_path:
         import webbrowser
         threading.Timer(.3, lambda: webbrowser.open(f'http://127.0.0.1:{port}')).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        server.workbench.cancel()
+        for w in server.workspaces.boards.values():
+            w.cancel()
     finally:
         try:
-            server.workbench.release_pointer()
+            for w in server.workspaces.boards.values():
+                w.release_pointer()
         finally:
             server.server_close()
+            if socket_path:
+                Path(socket_path).unlink(missing_ok=True)
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@
 import {readFrames} from './stream.js';
 const $ = id => document.getElementById(id);
 let csrf = '', state = {events:[]}, lastEvents = '', lastSessions = '';
+let lastMembers = '';
 let streamControl, binding, gesture, inputBusy = false, inputs = [];
 const screen = $('screen');
 const selected = new Set();
@@ -15,6 +16,16 @@ async function task(fn){try{await fn();await refresh();}catch(e){notice(e.messag
 function node(tag,content,className){const n=document.createElement(tag);if(content!==undefined)n.textContent=content;if(className)n.className=className;return n;}
 async function refresh(){
   state=await api('state');csrf=state.csrf;
+  $('identity').textContent=state.user+' · '+(state.role==='owner'?'소유자':'테스터');
+  $('membersOpen').hidden=state.role!=='owner';
+  $('boot').disabled=state.role!=='owner';
+  const members=JSON.stringify(state.members);
+  if(members!==lastMembers){lastMembers=members;$('memberList').replaceChildren();for(const member of state.members||[]){
+    const row=node('div',undefined,'row member');
+    row.append(node('span',member.id+' · '+(member.queue_position?'대기 '+member.queue_position+'번째':member.running?'실행 중':member.pending?'승인 대기':member.ai_allowed?'사용 가능':'사용 중지')));
+    const button=node('button',member.ai_allowed?'사용 중지':'사용 허용');
+    button.onclick=()=>task(()=>api('admin/ai',{user:member.id,allowed:!member.ai_allowed}));row.append(button);$('memberList').append(row);
+  }}
   if(binding && binding.session !== state.session?.id) streamControl?.abort();
   if(state.running || state.pending) cancelTouch();
   const sessions=JSON.stringify(state.sessions);
@@ -36,8 +47,8 @@ async function refresh(){
   }
   $('approval').hidden=!state.pending;
   if(state.pending){const a=state.pending.action;$('approvalText').textContent=a.message+'\n'+JSON.stringify({조작:a.kind,대상:a.target,입력:a.text});}
-  $('send').disabled=!!(state.running||state.pending);$('approve').disabled=state.running;
-  $('aiState').textContent=state.running?'화면을 확인하고 있습니다…':state.pending?'사용자 확인을 기다립니다.':'이미지·로그는 AI에 전송하지 않습니다.';
+  $('send').disabled=!!(state.running||state.pending||!state.ai_allowed||!state.session);$('approve').disabled=state.running;
+  $('aiState').textContent=!state.ai_allowed?'소유자가 AI 사용을 중지했습니다.':state.queue_position?'다른 요청 종료 후 실행 · 대기 '+state.queue_position+'번째':state.running?'확인 중 · 남은 호출 '+state.steps_left+'회':state.pending?'사용자 확인을 기다립니다.':'요청당 최대 '+state.step_limit+'회 · 이미지 전송 없음';
 }
 async function refreshDevices(){const result=await api('devices');const old=$('devices').value;$('devices').replaceChildren();for(const d of result.devices)$('devices').add(new Option(d.label+' · '+d.state,d.serial));if(!result.devices.length)$('devices').add(new Option('연결된 기기 없음',''));if(old)$('devices').value=old;$('avds').replaceChildren(...result.avds.map(a=>new Option(a,a)));}
 async function screenLoop(){
@@ -69,13 +80,21 @@ async function screenLoop(){
   setTimeout(screenLoop,500);
 }
 $('startForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('start',{serial:$('devices').value,package:$('package').value,title:$('title').value});selected.clear();notice('테스트를 시작했습니다. 앱을 열고 조작하세요.');});};
+$('membersOpen').onclick=()=>$('members').showModal();
+$('membersClose').onclick=()=>$('members').close();
+$('debugRead').onclick=()=>task(async()=>{
+  const result=await api('debug',{tool:$('debugTool').value});
+  $('attachmentImage').hidden=true;$('attachmentText').hidden=false;
+  $('attachmentText').textContent=typeof result.result==='string'?result.result:JSON.stringify(result.result,null,2);
+  $('attachment').showModal();notice('조회 결과를 타임라인에 남겼습니다.');
+});
 $('refresh').onclick=()=>task(refreshDevices);
 $('load').onclick=()=>task(async()=>{await api('load',{id:$('sessions').value});selected.clear();notice('이전 기록을 열었습니다.');});
 $('launch').onclick=()=>task(()=>api('launch',{}));
 $('boot').onclick=()=>task(async()=>{await api('boot',{name:$('avds').value});notice('에뮬레이터를 시작했습니다. 부팅 후 연결 목록을 새로고침하세요.');$('help').close();});
 $('capture').onclick=()=>task(async()=>{const b=$('capture');b.disabled=true;try{await api('capture',{screen:$('includeScreen').checked});notice('수집 결과를 타임라인에 남겼습니다. 누락 여부를 확인하세요.');}finally{b.disabled=false;}});
 $('noteForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('note',{message:$('note').value});$('note').value='';});};
-$('chatForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('chat',{goal:$('goal').value,consent:$('consent').checked});$('goal').value='';notice('AI 테스트를 시작했습니다.');});};
+$('chatForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('chat',{goal:$('goal').value,consent:$('consent').checked,consent_logs:$('consentLogs').checked});$('goal').value='';notice('AI 테스트를 요청했습니다. 다른 요청이 실행 중이면 순서대로 시작합니다.');});};
 $('example').onclick=()=>{$('goal').value='현재 화면을 살펴보고 테스트할 항목을 알려줘';$('goal').focus();};
 $('stop').onclick=()=>task(()=>api('stop',{}));
 $('approve').onclick=()=>task(()=>api('approve',{id:state.pending?.id,approved:true}));

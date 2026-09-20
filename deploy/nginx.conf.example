@@ -1,0 +1,15 @@
+# 기존 HTTPS server 블록에 포함한다. 도메인·인증서 설정은 서버 환경에 맞게 유지한다.
+# 프록시 worker와 플리파는 같은 전용 OS 사용자로 실행한다(소켓 권한 0600).
+# 사용자 인증 파일은 저장소 밖에 두며 사용자 이름을 PLIPA_USERS의 키와 맞춘다.
+location / {
+    auth_basic "Plipa";
+    auth_basic_user_file /etc/plipa/users.htpasswd;
+    proxy_pass http://unix:/tmp/plipa.sock;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Plipa-User $remote_user;
+    proxy_set_header Authorization "";
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 300s;
+    access_log off;
+}
