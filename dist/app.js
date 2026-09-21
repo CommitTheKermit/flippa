@@ -5,6 +5,7 @@ let csrf = '', state = {events:[]}, lastEvents = '', lastSessions = '';
 let lastMembers = '';
 let streamControl, binding, gesture, inputBusy = false, inputs = [];
 let deviceState = {phase:'idle',message:'기본 에뮬레이터를 확인하고 있습니다.'}, previewSerial = '';
+let lastPreparationPhase = '';
 const screen = $('screen');
 const selected = new Set();
 function notice(message, error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error);}
@@ -65,6 +66,10 @@ function updateDeviceControls(){
 async function refreshDevices(){
   const result=await api('devices'),old=$('devices').value,previousPreview=previewSerial;
   deviceState=result.preparation||deviceState;
+  if(!state.session && deviceState.phase!==lastPreparationPhase){
+    lastPreparationPhase=deviceState.phase;
+    notice(deviceState.message||'에뮬레이터 상태를 확인하고 있습니다.', ['error','unavailable'].includes(deviceState.phase));
+  }
   $('devices').replaceChildren();
   for(const d of result.devices)$('devices').add(new Option(d.label+' · '+d.state,d.serial));
   if(!result.devices.length)$('devices').add(new Option('연결된 기기 없음',''));
