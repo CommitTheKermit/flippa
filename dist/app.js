@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 let csrf = '', state = {events:[]}, lastEvents = '', lastSessions = '';
 let lastMembers = '';
 let streamControl, binding, gesture, inputBusy = false, inputs = [];
+let deviceState = {phase:'idle',message:'기본 에뮬레이터를 확인하고 있습니다.'}, previewSerial = '';
 const screen = $('screen');
 const selected = new Set();
 function notice(message, error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error);}
@@ -28,6 +29,7 @@ async function refresh(){
   }}
   if(binding && binding.session !== state.session?.id) streamControl?.abort();
   if(state.running || state.pending) cancelTouch();
+  updateDeviceControls();
   const sessions=JSON.stringify(state.sessions);
   if(sessions!==lastSessions){lastSessions=sessions;const old=$('sessions').value;$('sessions').replaceChildren(new Option('기록 선택',''));for(const s of state.sessions)$('sessions').add(new Option(s.title+' · '+s.created.slice(0,10),s.id));$('sessions').value=old;}
   const events=JSON.stringify(state.events);
@@ -52,28 +54,53 @@ async function refresh(){
   $('aiModel').disabled=aiBusy;$('aiReasoning').disabled=aiBusy;
   $('aiState').textContent=!state.ai_allowed?'소유자가 AI 사용을 중지했습니다.':state.queue_position?'다른 요청 종료 후 실행 · 대기 '+state.queue_position+'번째':state.running?'확인 중 · 남은 호출 '+state.steps_left+'회':state.pending?'사용자 확인을 기다립니다.':'요청당 최대 '+state.step_limit+'회 · 이미지 전송 없음';
 }
-async function refreshDevices(){const result=await api('devices');const old=$('devices').value;$('devices').replaceChildren();for(const d of result.devices)$('devices').add(new Option(d.label+' · '+d.state,d.serial));if(!result.devices.length)$('devices').add(new Option('연결된 기기 없음',''));if(old)$('devices').value=old;$('avds').replaceChildren(...result.avds.map(a=>new Option(a,a)));}
+function updateDeviceControls(){
+  const interactive=!!state.session;
+  $('launch').disabled=!interactive;
+  document.querySelectorAll('[data-key]').forEach(button=>button.disabled=!interactive);
+  $('input').disabled=!interactive;
+  $('inputForm').querySelector('button').disabled=!interactive;
+  $('screenHint').textContent=interactive?'실시간 화면 · 클릭·드래그·영문 키보드로 조작하세요. 한글 입력은 에뮬레이터 키보드를 사용하세요.':'읽기 전용 미리보기입니다. 테스트를 시작하면 조작과 기록이 활성화됩니다.';
+}
+async function refreshDevices(){
+  const result=await api('devices'),old=$('devices').value,previousPreview=previewSerial;
+  deviceState=result.preparation||deviceState;
+  $('devices').replaceChildren();
+  for(const d of result.devices)$('devices').add(new Option(d.label+' · '+d.state,d.serial));
+  if(!result.devices.length)$('devices').add(new Option('연결된 기기 없음',''));
+  if(old && result.devices.some(d=>d.serial===old))$('devices').value=old;
+  else if(deviceState.serial)$('devices').value=deviceState.serial;
+  $('avds').replaceChildren(...result.avds.map(a=>new Option(a,a)));
+  if(deviceState.default)$('avds').value=deviceState.default;
+  previewSerial=state.session?'':deviceState.phase==='ready'?deviceState.serial:'';
+  if(binding?.serial && (binding.serial!==previewSerial || state.session))streamControl?.abort();
+  if(previousPreview!==previewSerial && !state.session)streamControl?.abort();
+  $('deviceStatus').textContent=deviceState.message||'에뮬레이터 상태를 확인하고 있습니다.';
+  $('prepare').hidden=state.role!=='owner'||!['error','unavailable'].includes(deviceState.phase);
+}
 async function screenLoop(){
-  if(state.session && !document.hidden){
-    const session=state.session.id, viewer=crypto.randomUUID();
+  const target=state.session?{session:state.session.id}:previewSerial?{serial:previewSerial}:null;
+  if(target && !document.hidden){
+    const targetKey=target.session?'session:'+target.session:'preview:'+target.serial,viewer=crypto.randomUUID();
     streamControl=new AbortController();
     const control=streamControl;
     try{
       const response=await fetch('/api/stream',{method:'POST',signal:control.signal,
-        headers:{'Content-Type':'application/json','X-Plipa-CSRF':csrf},body:JSON.stringify({session,viewer})});
+        headers:{'Content-Type':'application/json','X-Plipa-CSRF':csrf},body:JSON.stringify({...target,viewer})});
       if(!response.ok) throw new Error((await response.json()).error);
       const reader=response.body.getReader();
       try{
         for await (const png of readFrames(reader)){
           const bitmap=await createImageBitmap(new Blob([png],{type:'image/png'}));
-          if(control.signal.aborted || state.session?.id!==session){bitmap.close();break;}
+          const currentKey=state.session?'session:'+state.session.id:previewSerial?'preview:'+previewSerial:'';
+          if(control.signal.aborted || currentKey!==targetKey){bitmap.close();break;}
           screen.width=bitmap.width;screen.height=bitmap.height;
           screen.getContext('2d',{alpha:false}).drawImage(bitmap,0,0);bitmap.close();
-          binding={session,viewer};screen.hidden=false;$('screenEmpty').hidden=true;
+          binding={...target,viewer,interactive:!!target.session};screen.hidden=false;$('screenEmpty').hidden=true;
         }
       }finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
     }catch(e){
-      if(e.name!=='AbortError') $('screenEmpty').textContent=e.message || '화면 연결을 확인하세요. 기록은 보존됩니다.';
+      if(e.name!=='AbortError') $('deviceStatus').textContent=e.message || '화면 연결을 확인하세요. 기록은 보존됩니다.';
     }finally{
       cancelTouch();binding=null;screen.hidden=true;$('screenEmpty').hidden=false;
       control.abort();
@@ -91,9 +118,10 @@ $('debugRead').onclick=()=>task(async()=>{
   $('attachment').showModal();notice('조회 결과를 타임라인에 남겼습니다.');
 });
 $('refresh').onclick=()=>task(refreshDevices);
+$('prepare').onclick=()=>task(async()=>{await api('prepare',{});await refreshDevices();notice('기본 에뮬레이터 준비를 다시 시작했습니다.');});
 $('load').onclick=()=>task(async()=>{await api('load',{id:$('sessions').value});selected.clear();notice('이전 기록을 열었습니다.');});
 $('launch').onclick=()=>task(()=>api('launch',{}));
-$('boot').onclick=()=>task(async()=>{await api('boot',{name:$('avds').value});notice('에뮬레이터를 시작했습니다. 부팅 후 연결 목록을 새로고침하세요.');$('help').close();});
+$('boot').onclick=()=>task(async()=>{await api('boot',{name:$('avds').value});await refreshDevices();notice('선택한 에뮬레이터 준비를 시작했습니다.');$('help').close();});
 $('capture').onclick=()=>task(async()=>{const b=$('capture');b.disabled=true;try{await api('capture',{screen:$('includeScreen').checked});notice('수집 결과를 타임라인에 남겼습니다. 누락 여부를 확인하세요.');}finally{b.disabled=false;}});
 $('noteForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('note',{message:$('note').value});$('note').value='';});};
 $('chatForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('chat',{goal:$('goal').value,consent:$('consent').checked,consent_logs:$('consentLogs').checked,model:$('aiModel').value,reasoning_effort:$('aiReasoning').value});$('goal').value='';notice('AI 테스트를 요청했습니다. 다른 요청이 실행 중이면 순서대로 시작합니다.');});};
@@ -125,11 +153,11 @@ function cancelTouch(){
   enqueue({...old.binding,phase:'cancel'});
 }
 function queueKey(key){
-  if(!binding || state.running || state.pending || gesture || inputs.length>=32)return;
+  if(!binding?.interactive || state.running || state.pending || gesture || inputs.length>=32)return;
   enqueue({...binding,phase:'key',key});
 }
 screen.onpointerdown=e=>{
-  if(!binding || gesture || state.running || state.pending || e.button!==0)return;
+  if(!binding?.interactive || gesture || state.running || state.pending || e.button!==0)return;
   e.preventDefault();screen.focus();screen.setPointerCapture(e.pointerId);
   gesture={id:e.pointerId,binding:{...binding},...coords(e)};
   enqueue({...binding,phase:'down',...coords(e)});
@@ -164,4 +192,4 @@ $('reportOpen').onclick=()=>{if(!selected.size){notice('타임라인에서 공�
 $('reportClose').onclick=()=>$('report').close();
 $('exportForm').onsubmit=e=>{e.preventDefault();task(async()=>{const blob=await api('export',{ids:[...selected],title:$('reportTitle').value,steps:$('steps').value,expected:$('expected').value,actual:$('actual').value,ui:$('shareUi').checked,logs:$('shareLogs').checked,screens:$('shareScreens').checked});const url=URL.createObjectURL(blob),a=node('a');a.href=url;a.download='plipa-qa.zip';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('report').close();notice('선택한 기록을 내보냈습니다. 전달 전 ZIP 내용을 확인하세요.');});};
 if(document.modelContext?.registerTool){Promise.resolve(document.modelContext.registerTool({name:'read_plipa_test_status',description:'Read the current Plipa session and event count. Does not expose QA evidence or execute device actions.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async input=>{if(!input||Object.keys(input).length)throw new Error('No arguments expected');await refresh();return {title:state.session?.title||null,running:state.running,awaitingApproval:!!state.pending,eventCount:state.events.length};}})).catch(()=>{});}
-(async()=>{try{await refresh();await refreshDevices();}catch(e){notice(e.message,true);}screenLoop();async function poll(){try{await refresh();}catch(e){notice('플리파 서버에 연결되지 않았습니다. 실행 창을 확인하세요.',true);}setTimeout(poll,1500);}setTimeout(poll,1500);})();
+(async()=>{try{await refresh();await refreshDevices();if(state.role==='owner'&&deviceState.phase==='idle'){await api('prepare',{});await refreshDevices();}}catch(e){notice(e.message,true);}screenLoop();async function poll(){try{await refresh();await refreshDevices();}catch(e){notice('플리파 서버에 연결되지 않았습니다. 실행 창을 확인하세요.',true);}setTimeout(poll,1500);}setTimeout(poll,1500);})();

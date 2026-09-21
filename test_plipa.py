@@ -12,6 +12,7 @@ import zipfile
 import device
 import emulator
 import ai
+from emulator_lifecycle import EmulatorLifecycle
 from server import Handler, ThreadingHTTPServer, Workbench, save_json
 
 
@@ -141,9 +142,29 @@ class PlipaTest(unittest.TestCase):
         args = popen.call_args.args[0]
         for expected in ('-no-window', '-no-audio', '-no-boot-anim', '-grpc-use-token'):
             self.assertIn(expected, args)
-        self.assertEqual(args[args.index('-cores') + 1], '2')
-        self.assertEqual(args[args.index('-memory') + 1], '2048')
+        self.assertEqual(args[args.index('-cores') + 1], '4')
+        self.assertEqual(args[args.index('-memory') + 1], '3072')
         thread.return_value.start.assert_called_once()
+
+    def test_default_emulator_preparation_is_idempotent_and_reports_ready(self):
+        lifecycle = EmulatorLifecycle('Current_Phone_API_37')
+        worker = Mock()
+        worker.is_alive.return_value = True
+        with patch('emulator_lifecycle.device.avds', return_value=['Current_Phone_API_37']), \
+             patch('emulator_lifecycle.device.find_avd', return_value=None), \
+             patch('emulator_lifecycle.threading.Thread', return_value=worker) as thread:
+            self.assertEqual(lifecycle.prepare_default()['phase'], 'starting')
+            self.assertEqual(lifecycle.prepare_default()['phase'], 'starting')
+        thread.assert_called_once()
+        worker.start.assert_called_once()
+
+        ready = {'serial': 'emulator-5554', 'state': 'device'}
+        with patch('emulator_lifecycle.device.boot') as boot, \
+             patch('emulator_lifecycle.device.find_avd', return_value=ready), \
+             patch('emulator_lifecycle.device.boot_completed', return_value=True):
+            lifecycle._boot('Current_Phone_API_37')
+        boot.assert_called_once_with('Current_Phone_API_37')
+        self.assertEqual((lifecycle.phase, lifecycle.serial), ('ready', 'emulator-5554'))
 
     def test_stream_defaults_to_720_and_windows_discovery(self):
         with patch.dict('emulator.os.environ', {}, clear=True):
@@ -243,6 +264,37 @@ class PlipaTest(unittest.TestCase):
             self.assertIsNone(self.w.pointer)
             connection.mouse.assert_called_with(.5, .5, False)
             connection.close.assert_called_once()
+
+    def test_preview_stream_does_not_require_a_test_session(self):
+        import http.client
+        import struct
+        from types import SimpleNamespace
+        stopped = threading.Event()
+        class Frames:
+            def __iter__(self):
+                yield SimpleNamespace(format=SimpleNamespace(width=432, height=936), image=b'preview')
+                stopped.wait(2)
+            def cancel(self): stopped.set()
+        connection = Mock(size=(1080, 2340))
+        connection.frames.return_value = Frames()
+        self.w.current = None
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server.workbench = self.w
+        server.csrf = 'synthetic'
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        client = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+        with patch('server.device.devices', return_value=[{'serial':'emulator-5554','state':'device'}]), \
+             patch('server.emulator.Connection', return_value=connection):
+            client.request('POST', '/api/stream', json.dumps({'serial':'emulator-5554','viewer':'previewer'}),
+                           {'Content-Type':'application/json','X-Plipa-CSRF':'synthetic'})
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            length = struct.unpack('!I', response.read(4))[0]
+            self.assertEqual(response.read(length), b'preview')
+            response.close()
+        client.close()
 
     def test_http_origin_and_csrf(self):
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)

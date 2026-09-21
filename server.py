@@ -15,6 +15,7 @@ import zipfile
 import device
 import ai
 import emulator
+from emulator_lifecycle import EmulatorLifecycle
 import math
 import queue
 import struct
@@ -562,8 +563,12 @@ class Handler(BaseHTTPRequestHandler):
                     'members': registry.members() if registry and self.role == 'owner' else []})
             if path == '/api/devices':
                 allowed = self.workbench.allowed_devices
+                preparation = (self.server.emulators.status()
+                               if hasattr(self.server, 'emulators') else
+                               {'phase': 'idle', 'name': '', 'serial': '', 'message': '', 'default': ''})
                 return self.reply({'devices': [d for d in device.devices() if allowed is None or d['serial'] in allowed],
-                                   'avds': device.avds() if self.role == 'owner' else []})
+                                   'avds': device.avds() if self.role == 'owner' else [],
+                                   'preparation': preparation})
             if path == '/api/screen':
                 with self.workbench.operation:
                     return self.reply(device.screenshot(self.workbench.session()['serial']), mime='image/png')
@@ -594,10 +599,22 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError('잘못된 화면 연결 ID입니다.')
         with w.lock:
             w.emulator_activity()
-            sid = w.session()['id']
-            if data.get('session') != sid or viewer in w.viewers:
+            requested_session = data.get('session')
+            if requested_session:
+                session = w.session()
+                if requested_session != session['id']:
+                    raise ValueError('테스트가 바뀌었습니다. 화면을 다시 연결하세요.')
+                sid = session['id']
+                serial = session['serial']
+            else:
+                sid = None
+                serial = data.get('serial')
+                w.require_device(serial)
+                if not any(d['serial'] == serial and d['state'] == 'device' for d in device.devices()):
+                    raise ValueError('준비된 에뮬레이터 화면을 찾지 못했습니다.')
+            if viewer in w.viewers:
                 raise ValueError('화면 연결을 다시 시작하세요.')
-            connection = emulator.Connection(w.session()['serial'])
+            connection = emulator.Connection(serial)
             w.viewers[viewer] = (sid, connection)
         frames = connection.frames()
         latest = queue.Queue(maxsize=1)
@@ -630,7 +647,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             while not ended.is_set():
                 with w.lock:
-                    if w.session()['id'] != sid:
+                    if sid is not None and (not w.current or w.current['id'] != sid):
                         break
                 try:
                     frame = latest.get(timeout=1)
@@ -686,7 +703,18 @@ class Handler(BaseHTTPRequestHandler):
                     elif path == '/api/boot':
                         if self.role != 'owner':
                             raise ValueError('소유자가 에뮬레이터를 준비해야 합니다.')
-                        w.manage_emulator(device.boot(data.get('name')))
+                        if hasattr(self.server, 'emulators'):
+                            prepared = self.server.emulators.prepare(data.get('name'))
+                            w.manage_emulator(prepared['name'])
+                        else:
+                            w.manage_emulator(device.boot(data.get('name')))
+                    elif path == '/api/prepare':
+                        if self.role != 'owner':
+                            raise ValueError('소유자가 에뮬레이터를 준비해야 합니다.')
+                        if not hasattr(self.server, 'emulators'):
+                            raise ValueError('자동 준비 기능을 사용할 수 없습니다.')
+                        prepared = self.server.emulators.prepare_default()
+                        w.manage_emulator(prepared['name'])
                     elif path == '/api/launch':
                         if w.running or w.pending:
                             raise ValueError('AI를 중지한 뒤 앱을 실행하세요.')
@@ -746,6 +774,7 @@ def main():
     server.origin = origin
     server.public_origin = origin
     server.workspaces = Workspaces(DATA, users)
+    server.emulators = EmulatorLifecycle()
     print(f'플리파 {origin}', flush=True)
     import sys
     if '--open' in sys.argv and not socket_path:

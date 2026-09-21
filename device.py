@@ -69,6 +69,23 @@ def avd_name(serial):
     return lines[0] if lines else ''
 
 
+def find_avd(name):
+    for entry in devices():
+        try:
+            if avd_name(entry['serial']) == name:
+                return entry
+        except ValueError:
+            continue
+    return None
+
+
+def boot_completed(serial):
+    try:
+        return adb(serial, 'shell', 'getprop', 'sys.boot_completed').strip() == '1'
+    except ValueError:
+        return False
+
+
 def stop(serial):
     adb(serial, 'emu', 'kill')
 
@@ -92,8 +109,8 @@ def boot(name):
         raise ValueError('등록된 가상 기기를 선택하세요.')
     args = [EMULATOR, '-avd', name, '-no-window', '-no-audio', '-no-boot-anim',
             '-gpu', os.environ.get('PLIPA_EMULATOR_GPU', 'auto'),
-            '-cores', _number_setting('PLIPA_EMULATOR_CORES', 2, 1, 4),
-            '-memory', _number_setting('PLIPA_EMULATOR_MEMORY_MB', 2048, 1024, 4096),
+            '-cores', _number_setting('PLIPA_EMULATOR_CORES', 4, 1, 4),
+            '-memory', _number_setting('PLIPA_EMULATOR_MEMORY_MB', 3072, 1024, 4096),
             '-grpc-use-token']
     subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     threading.Thread(target=_optimize_when_ready, args=(name,), daemon=True).start()
