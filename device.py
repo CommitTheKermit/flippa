@@ -15,7 +15,7 @@ DEFAULT_SDK = ((Path(os.environ['LOCALAPPDATA']) if os.environ.get('LOCALAPPDATA
 SDK = Path(os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT') or DEFAULT_SDK)
 ADB = shutil.which('adb') or str(SDK / 'platform-tools' / ('adb.exe' if os.name == 'nt' else 'adb'))
 EMULATOR = str(SDK / 'emulator' / ('emulator.exe' if os.name == 'nt' else 'emulator'))
-PACKAGE = 'com.chamsae.chaekchaek.integration'
+PACKAGE = 'com.chamsae.chaekchaek'
 
 
 def redact(text):
