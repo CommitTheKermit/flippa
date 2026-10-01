@@ -7,6 +7,8 @@ let streamControl, binding, gesture, inputBusy = false, inputs = [];
 let deviceState = {phase:'idle',message:'기본 에뮬레이터를 확인하고 있습니다.'}, previewSerial = '';
 let lastPreparationPhase = '';
 const screen = $('screen');
+const zoomSteps = [.75, 1, 1.25, 1.5, 1.75, 2];
+let screenZoom = 1;
 const selected = new Set();
 function notice(message, error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error);}
 async function api(path, data){
@@ -63,6 +65,24 @@ function updateDeviceControls(){
   $('inputForm').querySelector('button').disabled=!interactive;
   $('screenHint').textContent=interactive?'실시간 화면 · 클릭·드래그·영문 키보드로 조작하세요. 한글 입력은 에뮬레이터 키보드를 사용하세요.':'읽기 전용 미리보기입니다. 테스트를 시작하면 조작과 기록이 활성화됩니다.';
 }
+function updateScreenSize(){
+  if(!screen.width || !screen.height)return;
+  const wrap=$('screenWrap');
+  const availableWidth=Math.max(1,wrap.clientWidth-32),availableHeight=Math.max(1,wrap.clientHeight-32);
+  const fit=Math.min(availableWidth/screen.width,availableHeight/screen.height,1);
+  const scale=fit*screenZoom;
+  screen.style.width=Math.round(screen.width*scale)+'px';
+  screen.style.height=Math.round(screen.height*scale)+'px';
+  $('zoomValue').value=Math.round(screenZoom*100)+'%';
+  $('zoomValue').textContent=Math.round(screenZoom*100)+'%';
+  $('zoomOut').disabled=screenZoom===zoomSteps[0];
+  $('zoomIn').disabled=screenZoom===zoomSteps.at(-1);
+}
+function changeScreenZoom(direction){
+  const index=zoomSteps.indexOf(screenZoom);
+  screenZoom=zoomSteps[Math.max(0,Math.min(zoomSteps.length-1,index+direction))];
+  updateScreenSize();
+}
 async function refreshDevices(){
   const result=await api('devices'),old=$('devices').value,previousPreview=previewSerial;
   deviceState=result.preparation||deviceState;
@@ -101,6 +121,7 @@ async function screenLoop(){
           if(control.signal.aborted || currentKey!==targetKey){bitmap.close();break;}
           screen.width=bitmap.width;screen.height=bitmap.height;
           screen.getContext('2d',{alpha:false}).drawImage(bitmap,0,0);bitmap.close();
+          updateScreenSize();
           binding={...target,viewer,interactive:!!target.session};screen.hidden=false;$('screenEmpty').hidden=true;
         }
       }finally{await reader.cancel().catch(()=>{});reader.releaseLock();}
@@ -126,6 +147,10 @@ $('refresh').onclick=()=>task(refreshDevices);
 $('prepare').onclick=()=>task(async()=>{await api('prepare',{});await refreshDevices();notice('기본 에뮬레이터 준비를 다시 시작했습니다.');});
 $('load').onclick=()=>task(async()=>{await api('load',{id:$('sessions').value});selected.clear();notice('이전 기록을 열었습니다.');});
 $('launch').onclick=()=>task(()=>api('launch',{}));
+$('zoomOut').onclick=()=>changeScreenZoom(-1);
+$('zoomIn').onclick=()=>changeScreenZoom(1);
+$('zoomReset').onclick=()=>{screenZoom=1;$('screenWrap').scrollTo({left:0,top:0});updateScreenSize();};
+new ResizeObserver(updateScreenSize).observe($('screenWrap'));
 $('boot').onclick=()=>task(async()=>{await api('boot',{name:$('avds').value});await refreshDevices();notice('선택한 에뮬레이터 준비를 시작했습니다.');$('help').close();});
 $('capture').onclick=()=>task(async()=>{const b=$('capture');b.disabled=true;try{await api('capture',{screen:$('includeScreen').checked});notice('수집 결과를 타임라인에 남겼습니다. 누락 여부를 확인하세요.');}finally{b.disabled=false;}});
 $('noteForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('note',{message:$('note').value});$('note').value='';});};
