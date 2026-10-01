@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 let csrf = '', state = {events:[]}, lastEvents = '', lastSessions = '';
 let lastMembers = '';
 let streamControl, binding, gesture, inputBusy = false, inputs = [];
+let scrollBusy = false, queuedScrollDirection = '', wheelScrollDirection = '', wheelScrollTimer;
 let deviceState = {phase:'idle',message:'기본 에뮬레이터를 확인하고 있습니다.'}, previewSerial = '';
 let lastPreparationPhase = '';
 const screen = $('screen');
@@ -62,6 +63,7 @@ function updateDeviceControls(){
   const interactive=!!state.session;
   $('launch').disabled=!interactive;
   document.querySelectorAll('[data-key]').forEach(button=>button.disabled=!interactive);
+  document.querySelectorAll('[data-scroll]').forEach(button=>button.disabled=!interactive);
   $('input').disabled=!interactive;
   $('inputForm').querySelector('button').disabled=!interactive;
   $('screenHint').textContent=interactive?'실시간 화면 · 클릭·드래그·영문 키보드로 조작하세요. 한글 입력은 에뮬레이터 키보드를 사용하세요.':'읽기 전용 미리보기입니다. 테스트를 시작하면 조작과 기록이 활성화됩니다.';
@@ -195,6 +197,18 @@ function queueKey(key){
   if(!binding?.interactive || state.running || state.pending || gesture || inputs.length>=32)return;
   enqueue({...binding,phase:'key',key});
 }
+async function scrollDevice(direction){
+  if(!binding?.interactive || state.running || state.pending || gesture)return;
+  if(scrollBusy){queuedScrollDirection=direction;return;}
+  scrollBusy=true;
+  try{await api('input',{...binding,phase:'scroll',direction});}
+  catch(e){notice(e.message,true);}
+  finally{
+    scrollBusy=false;
+    if(queuedScrollDirection){const next=queuedScrollDirection;queuedScrollDirection='';scrollDevice(next);}
+  }
+}
+document.querySelectorAll('[data-scroll]').forEach(button=>button.onclick=()=>scrollDevice(button.dataset.scroll));
 screen.onpointerdown=e=>{
   if(!binding?.interactive || gesture || state.running || state.pending || e.button!==0)return;
   e.preventDefault();screen.focus();screen.setPointerCapture(e.pointerId);
@@ -211,6 +225,14 @@ screen.onpointerup=e=>{
 };
 screen.onpointercancel=cancelTouch;
 screen.onlostpointercapture=cancelTouch;
+screen.addEventListener('wheel',e=>{
+  if(!binding?.interactive || state.running || state.pending)return;
+  e.preventDefault();
+  if(!e.deltaY)return;
+  wheelScrollDirection=e.deltaY<0?'up':'down';
+  clearTimeout(wheelScrollTimer);
+  wheelScrollTimer=setTimeout(()=>scrollDevice(wheelScrollDirection),80);
+},{passive:false});
 window.addEventListener('blur',cancelTouch);
 document.addEventListener('visibilitychange',()=>{if(document.hidden){cancelTouch();streamControl?.abort();}});
 window.addEventListener('pagehide',()=>{

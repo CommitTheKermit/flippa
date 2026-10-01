@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch, Mock
+from unittest.mock import call, patch, Mock
 import urllib.request
 import urllib.error
 import zipfile
@@ -226,6 +226,26 @@ class PlipaTest(unittest.TestCase):
             with self.assertRaises(ValueError): self.w.release_pointer()
             self.assertIsNone(self.w.pointer)
             self.assertTrue(self.w.events()[-1]['missing'])
+
+    def test_live_scroll_uses_viewer_and_records_direction(self):
+        connection = Mock()
+        self.w.viewers = {'viewer': ('test', connection)}
+        request = {'session': 'test', 'viewer': 'viewer', 'phase': 'scroll', 'direction': 'down'}
+        with patch('server.time.sleep') as sleep:
+            self.w.live_input(request)
+        connection.mouse.assert_has_calls([call(.5, .72, True), call(.5, .3, False)])
+        sleep.assert_called_once_with(.18)
+        event = self.w.events()[-1]
+        self.assertEqual(event['action'], {'kind': 'scroll', 'direction': 'down', 'steps': 1,
+                                           'coordinates': 'normalized'})
+        with self.assertRaises(ValueError):
+            self.w.live_input(dict(request, direction='sideways'))
+        with self.assertRaises(ValueError):
+            self.w.live_input(dict(request, session='old'))
+        with patch('server.time.sleep') as sleep:
+            self.w.live_input(dict(request, direction='top'))
+        self.assertEqual(sleep.call_count, 8)
+        self.assertEqual(self.w.events()[-1]['action']['steps'], 8)
 
     def test_stream_frames_and_disconnected_touch_release(self):
         import http.client

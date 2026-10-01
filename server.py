@@ -283,6 +283,22 @@ class Workbench:
                 return
             if self.running or self.pending:
                 raise ValueError('AI를 중지하거나 보류 조작을 취소한 뒤 직접 조작하세요.')
+            if phase == 'scroll':
+                if self.pointer:
+                    raise ValueError('터치를 끝낸 뒤 스크롤하세요.')
+                direction = data.get('direction')
+                if direction not in ('up', 'down', 'top', 'bottom'):
+                    raise ValueError('지원하지 않는 스크롤 방향입니다.')
+                # Android scrolls when the virtual finger moves against the content.
+                start, end = ((.5, .3), (.5, .72)) if direction in ('up', 'top') else ((.5, .72), (.5, .3))
+                steps = 8 if direction in ('top', 'bottom') else 1
+                for _ in range(steps):
+                    connection.mouse(*start, True)
+                    time.sleep(.18)
+                    connection.mouse(*end, False)
+                self.event('manual', '수동 화면 스크롤', action={'kind': 'scroll', 'direction': direction,
+                           'steps': steps, 'coordinates': 'normalized'}, fact=True)
+                return
             if phase == 'key':
                 key = data.get('key')
                 if not isinstance(key, str) or not (key in ('GoBack', 'GoHome', 'Enter', 'Backspace',
