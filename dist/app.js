@@ -9,6 +9,7 @@ let lastPreparationPhase = '';
 const screen = $('screen');
 const zoomSteps = [.75, 1, 1.25, 1.5, 1.75, 2];
 let screenZoom = 1;
+let screenBaseSize;
 const selected = new Set();
 function notice(message, error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error);}
 async function api(path, data){
@@ -68,8 +69,16 @@ function updateDeviceControls(){
 function updateScreenSize(){
   if(!screen.width || !screen.height)return;
   const wrap=$('screenWrap');
-  const availableWidth=Math.max(1,wrap.clientWidth-32),availableHeight=Math.max(1,wrap.clientHeight-32);
-  const fit=Math.min(availableWidth/screen.width,availableHeight/screen.height,1);
+  if(screenZoom===1){
+    wrap.style.height='';
+    screenBaseSize={width:Math.max(1,wrap.clientWidth-32),height:Math.max(1,wrap.clientHeight-32),wrapHeight:wrap.clientHeight};
+  }else if(screenBaseSize){
+    wrap.style.height=Math.ceil(screenBaseSize.wrapHeight*screenZoom)+'px';
+  }else{
+    screenBaseSize={width:Math.max(1,wrap.clientWidth-32),height:Math.max(1,wrap.clientHeight-32),wrapHeight:wrap.clientHeight};
+    wrap.style.height=Math.ceil(screenBaseSize.wrapHeight*screenZoom)+'px';
+  }
+  const fit=Math.min(screenBaseSize.width/screen.width,screenBaseSize.height/screen.height,1);
   const scale=fit*screenZoom;
   screen.style.width=Math.round(screen.width*scale)+'px';
   screen.style.height=Math.round(screen.height*scale)+'px';
