@@ -5,10 +5,14 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
+
+import emulator
 
 DEFAULT_SDK = ((Path(os.environ['LOCALAPPDATA']) if os.environ.get('LOCALAPPDATA') else Path.home()) / 'Android/Sdk'
                if os.name == 'nt' else Path.home() / 'Library/Android/sdk')
@@ -65,8 +69,11 @@ def _number_setting(name, default, low, high):
 
 
 def avd_name(serial):
-    lines = adb(serial, 'emu', 'avd', 'name').strip().splitlines()
-    return lines[0] if lines else ''
+    try:
+        lines = adb(serial, 'emu', 'avd', 'name', timeout=5).strip().splitlines()
+    except ValueError:
+        lines = []  # A hung emulator's console fails, but its discovery file still names it.
+    return lines[0] if lines else emulator.discovery(serial)[1].get('avd.name', '')
 
 
 def find_avd(name):
@@ -81,13 +88,26 @@ def find_avd(name):
 
 def boot_completed(serial):
     try:
-        return adb(serial, 'shell', 'getprop', 'sys.boot_completed').strip() == '1'
+        return adb(serial, 'shell', 'getprop', 'sys.boot_completed', timeout=5).strip() == '1'
     except ValueError:
         return False
 
 
 def stop(serial):
-    adb(serial, 'emu', 'kill')
+    try:
+        adb(serial, 'emu', 'kill', timeout=5)
+        return
+    except ValueError:
+        pass
+    # A hung emulator ignores its console and keeps the AVD lock; end the process directly.
+    path, _ = emulator.discovery(serial)
+    if not path:
+        raise ValueError('에뮬레이터 프로세스를 찾지 못했습니다.')
+    try:
+        os.kill(int(path.stem.split('_')[1]), getattr(signal, 'SIGKILL', signal.SIGTERM))
+    except (OSError, ValueError):
+        pass  # Already gone.
+    path.unlink(missing_ok=True)
 
 
 def _optimize_when_ready(name):
@@ -112,7 +132,9 @@ def boot(name):
             '-cores', _number_setting('PLIPA_EMULATOR_CORES', 4, 1, 4),
             '-memory', _number_setting('PLIPA_EMULATOR_MEMORY_MB', 3072, 1024, 4096),
             '-grpc-use-token']
-    subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    # Keep the last boot's output so crashes can be diagnosed; the per-user temp dir stays private.
+    with open(Path(tempfile.gettempdir())/'plipa-emulator.log', 'wb') as log:
+        subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     threading.Thread(target=_optimize_when_ready, args=(name,), daemon=True).start()
     return name
 

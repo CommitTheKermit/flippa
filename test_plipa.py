@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -165,6 +166,29 @@ class PlipaTest(unittest.TestCase):
             lifecycle._boot('Current_Phone_API_37')
         boot.assert_called_once_with('Current_Phone_API_37')
         self.assertEqual((lifecycle.phase, lifecycle.serial), ('ready', 'emulator-5554'))
+
+    def test_hung_emulator_is_named_stopped_and_reported(self):
+        running = Path(self.temp.name)/'running'
+        running.mkdir()
+        (running/'pid_111.ini').write_text('port.serial=5554\navd.name=Stale\n', encoding='utf-8')
+        current = running/'pid_222.ini'
+        current.write_text('port.serial=5554\navd.name=Current_Phone_API_37\n', encoding='utf-8')
+        stale = (running/'pid_111.ini').stat().st_mtime
+        os.utime(current, (stale + 10, stale + 10))
+        with patch.dict('emulator.os.environ', {'PLIPA_EMULATOR_DISCOVERY': str(running)}), \
+             patch('device.adb', side_effect=ValueError('console hung')), \
+             patch('device.os.kill') as kill:
+            self.assertEqual(device.avd_name('emulator-5554'), 'Current_Phone_API_37')
+            device.stop('emulator-5554')
+        self.assertEqual(kill.call_args.args[0], 222)
+        self.assertFalse(current.exists())
+
+        lifecycle = EmulatorLifecycle('Current_Phone_API_37')
+        lifecycle.phase, lifecycle.target_name = 'ready', 'Current_Phone_API_37'
+        with patch('emulator_lifecycle.device.avds', return_value=['Current_Phone_API_37']), \
+             patch('emulator_lifecycle.device.find_avd', return_value={'serial': 'emulator-5554', 'state': 'device'}), \
+             patch('emulator_lifecycle.device.boot_completed', return_value=False):
+            self.assertEqual(lifecycle.status()['phase'], 'error')
 
     def test_stream_defaults_to_720_and_windows_discovery(self):
         with patch.dict('emulator.os.environ', {}, clear=True):

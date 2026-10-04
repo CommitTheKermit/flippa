@@ -43,23 +43,29 @@ def screenshot_size(image):
     return image.format.width or image.width, image.format.height or image.height
 
 
+def discovery(serial):
+    """Return (path, settings) of the emulator's discovery file; readable even when its console hangs."""
+    found = []
+    for folder in discovery_folders():
+        for path in folder.glob('pid_*.ini'):
+            try:
+                settings = dict(line.split('=', 1) for line in path.read_text(encoding='utf-8').splitlines() if '=' in line)
+                found.append((path.stat().st_mtime, path, settings))
+            except OSError:
+                continue
+    # A force-killed emulator leaves its file behind; the newest file owns the port.
+    for _, path, settings in sorted(found, key=lambda f: f[0], reverse=True):
+        if settings.get('port.serial') == serial.split('-')[1]:
+            return path, settings
+    return None, {}
+
+
 class Connection:
     def __init__(self, serial):
         if not isinstance(serial, str) or not re.fullmatch(r'emulator-\d+', serial):
             raise ValueError('로컬 Android 에뮬레이터만 지원합니다.')
-        settings = None
-        for folder in discovery_folders():
-            for path in folder.glob('pid_*.ini'):
-                try:
-                    candidate = dict(line.split('=', 1) for line in path.read_text(encoding='utf-8').splitlines() if '=' in line)
-                    if candidate.get('port.serial') == serial.split('-')[1] and candidate.get('grpc.token'):
-                        settings = candidate
-                        break
-                except OSError:
-                    continue
-            if settings:
-                break
-        if not settings or not settings.get('grpc.port', '').isdigit():
+        settings = discovery(serial)[1]
+        if not settings.get('grpc.token') or not settings.get('grpc.port', '').isdigit():
             raise ValueError('화면 연결 설정이 없습니다. 에뮬레이터를 종료하고 플리파에서 다시 시작하세요.')
         self.channel = grpc.insecure_channel('127.0.0.1:' + settings['grpc.port'],
                                              options=[('grpc.max_receive_message_length', 16777216)])

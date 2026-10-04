@@ -35,6 +35,10 @@ class EmulatorLifecycle:
                     self.phase = 'ready'
                     self.serial = running['serial']
                     self.message = '에뮬레이터가 준비됐습니다.'
+                elif self.phase == 'ready':
+                    self.phase = 'error'
+                    self.serial = ''
+                    self.message = '에뮬레이터가 종료됐거나 응답하지 않습니다. 다시 준비해 주세요.'
             if not default_name:
                 message = ('기본 에뮬레이터가 설정되지 않았습니다.' if available
                            else '등록된 에뮬레이터가 없습니다.')
@@ -70,6 +74,9 @@ class EmulatorLifecycle:
                 if self.target_name != name:
                     raise ValueError('다른 에뮬레이터를 준비하고 있습니다.')
                 return self.status()
+            if running:
+                # ponytail: listed but not booted and not ours = hung; may also kill a foreign boot in progress.
+                device.stop(running['serial'])
             self.phase = 'starting'
             self.target_name = name
             self.serial = ''
