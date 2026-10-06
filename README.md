@@ -28,7 +28,7 @@ AVD 생성과 관리에만 필요하며 서버 운영 중에는 닫아도 된다
 | --- | --- | --- |
 | `PLIPA_STREAM_SIZE` | `720` | 스트림 긴 변(px), 240~1920 |
 | `PLIPA_DEFAULT_AVD` | Windows: `Current_Phone_API_37` | 웹 접속 시 자동 준비할 AVD. 미설정 상태에서 AVD가 하나면 그 기기를 사용 |
-| `PLIPA_EMULATOR_CORES` | `4` | 에뮬레이터 CPU 코어, 1~4 |
+| `PLIPA_EMULATOR_CORES` | `2` | 에뮬레이터 CPU 코어, 1~4. 호스트 코어를 남겨 화면 연결 여유를 확보 |
 | `PLIPA_EMULATOR_MEMORY_MB` | `3072` | 에뮬레이터 RAM, 1024~4096MB |
 | `PLIPA_EMULATOR_IDLE_MINUTES` | `20` | 미사용 자동 종료 시간, 최소 1분 |
 | `PLIPA_EMULATOR_GPU` | `auto` | 그래픽 모드; 문제가 없으면 `auto` 유지 |

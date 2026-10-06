@@ -30,7 +30,7 @@ if (-not $env:PLIPA_DATA) {
 if ($Origin) { $env:PLIPA_ORIGIN = $Origin }
 if (-not $env:PLIPA_STREAM_SIZE) { $env:PLIPA_STREAM_SIZE = '720' }
 if (-not $env:PLIPA_DEFAULT_AVD) { $env:PLIPA_DEFAULT_AVD = 'Current_Phone_API_37' }
-if (-not $env:PLIPA_EMULATOR_CORES) { $env:PLIPA_EMULATOR_CORES = '4' }
+if (-not $env:PLIPA_EMULATOR_CORES) { $env:PLIPA_EMULATOR_CORES = '2' }
 if (-not $env:PLIPA_EMULATOR_MEMORY_MB) { $env:PLIPA_EMULATOR_MEMORY_MB = '3072' }
 if (-not $env:PLIPA_EMULATOR_IDLE_MINUTES) { $env:PLIPA_EMULATOR_IDLE_MINUTES = '20' }
 if (-not $env:PLIPA_EMULATOR_GPU) { $env:PLIPA_EMULATOR_GPU = 'auto' }

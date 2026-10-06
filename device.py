@@ -129,11 +129,17 @@ def boot(name):
         raise ValueError('등록된 가상 기기를 선택하세요.')
     args = [EMULATOR, '-avd', name, '-no-window', '-no-audio', '-no-boot-anim',
             '-gpu', os.environ.get('PLIPA_EMULATOR_GPU', 'auto'),
-            '-cores', _number_setting('PLIPA_EMULATOR_CORES', 4, 1, 4),
+            '-cores', _number_setting('PLIPA_EMULATOR_CORES', 2, 1, 4),
             '-memory', _number_setting('PLIPA_EMULATOR_MEMORY_MB', 3072, 1024, 4096),
+            '-no-snapshot',  # Quickboot never restored on the home server; skip snapshot load and save.
             '-grpc-use-token']
-    # Keep the last boot's output so crashes can be diagnosed; the per-user temp dir stays private.
-    with open(Path(tempfile.gettempdir())/'plipa-emulator.log', 'wb') as log:
+    # Keep this and the previous boot's output: a crash is usually followed by a re-prepare.
+    log_path = Path(tempfile.gettempdir())/'plipa-emulator.log'
+    try:
+        os.replace(log_path, log_path.with_suffix('.prev.log'))
+    except OSError:
+        pass  # No previous log, or a dying emulator still holds it on Windows.
+    with open(log_path, 'wb') as log:
         subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     threading.Thread(target=_optimize_when_ready, args=(name,), daemon=True).start()
     return name

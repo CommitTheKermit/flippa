@@ -141,9 +141,9 @@ class PlipaTest(unittest.TestCase):
              patch('device.threading.Thread') as thread:
             self.assertEqual(device.boot('Flippa_API_33'), 'Flippa_API_33')
         args = popen.call_args.args[0]
-        for expected in ('-no-window', '-no-audio', '-no-boot-anim', '-grpc-use-token'):
+        for expected in ('-no-window', '-no-audio', '-no-boot-anim', '-no-snapshot', '-grpc-use-token'):
             self.assertIn(expected, args)
-        self.assertEqual(args[args.index('-cores') + 1], '4')
+        self.assertEqual(args[args.index('-cores') + 1], '2')
         self.assertEqual(args[args.index('-memory') + 1], '3072')
         thread.return_value.start.assert_called_once()
 
