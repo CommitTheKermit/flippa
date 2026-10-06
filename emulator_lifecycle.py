@@ -35,7 +35,8 @@ class EmulatorLifecycle:
                     self.phase = 'ready'
                     self.serial = running['serial']
                     self.message = '에뮬레이터가 준비됐습니다.'
-                elif self.phase == 'ready':
+                elif self.phase == 'ready' and not (running and device.console_alive(running['serial'])):
+                    # A slow getprop only means the guest is busy (e.g. a heavy login screen).
                     self.phase = 'error'
                     self.serial = ''
                     self.message = '에뮬레이터가 종료됐거나 응답하지 않습니다. 다시 준비해 주세요.'
@@ -74,20 +75,24 @@ class EmulatorLifecycle:
                 if self.target_name != name:
                     raise ValueError('다른 에뮬레이터를 준비하고 있습니다.')
                 return self.status()
-            if running:
-                # ponytail: listed but not booted and not ours = hung; may also kill a foreign boot in progress.
+            if running and not device.console_alive(running['serial']):
+                # Dead console = hung emulator holding the AVD lock (docs/incidents/2026-10-01-emulator-hang.md).
                 device.stop(running['serial'])
+                running = None
+            # ponytail: a live console with a permanently hung guest is waited on, not killed; add a guest-level check if that appears.
             self.phase = 'starting'
             self.target_name = name
             self.serial = ''
-            self.message = '에뮬레이터를 시작하고 있습니다.'
-            self.worker = threading.Thread(target=self._boot, args=(name,), daemon=True)
+            self.message = ('에뮬레이터를 시작하고 있습니다.' if running is None
+                            else '에뮬레이터가 바쁩니다. 응답을 기다리고 있습니다.')
+            self.worker = threading.Thread(target=self._boot, args=(name, running is None), daemon=True)
             self.worker.start()
             return self.status()
 
-    def _boot(self, name):
+    def _boot(self, name, launch=True):
         try:
-            device.boot(name)
+            if launch:
+                device.boot(name)
             deadline = time.monotonic() + self.boot_timeout
             while time.monotonic() < deadline:
                 running = device.find_avd(name)

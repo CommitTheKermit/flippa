@@ -185,10 +185,30 @@ class PlipaTest(unittest.TestCase):
 
         lifecycle = EmulatorLifecycle('Current_Phone_API_37')
         lifecycle.phase, lifecycle.target_name = 'ready', 'Current_Phone_API_37'
+        busy = {'serial': 'emulator-5554', 'state': 'device'}
         with patch('emulator_lifecycle.device.avds', return_value=['Current_Phone_API_37']), \
-             patch('emulator_lifecycle.device.find_avd', return_value={'serial': 'emulator-5554', 'state': 'device'}), \
-             patch('emulator_lifecycle.device.boot_completed', return_value=False):
+             patch('emulator_lifecycle.device.find_avd', return_value=busy), \
+             patch('emulator_lifecycle.device.boot_completed', return_value=False), \
+             patch('emulator_lifecycle.device.console_alive', return_value=True), \
+             patch('emulator_lifecycle.device.stop') as stop, \
+             patch('emulator_lifecycle.threading.Thread') as thread:
+            # A busy guest (slow getprop, live console) stays ready and is never killed.
+            self.assertEqual(lifecycle.status()['phase'], 'ready')
+            lifecycle.phase = 'error'
+            lifecycle.prepare_default()
+            stop.assert_not_called()
+            self.assertEqual(thread.call_args.kwargs['args'], ('Current_Phone_API_37', False))
+        lifecycle.phase, lifecycle.worker = 'ready', None
+        with patch('emulator_lifecycle.device.avds', return_value=['Current_Phone_API_37']), \
+             patch('emulator_lifecycle.device.find_avd', return_value=busy), \
+             patch('emulator_lifecycle.device.boot_completed', return_value=False), \
+             patch('emulator_lifecycle.device.console_alive', return_value=False), \
+             patch('emulator_lifecycle.device.stop') as stop, \
+             patch('emulator_lifecycle.threading.Thread') as thread:
             self.assertEqual(lifecycle.status()['phase'], 'error')
+            lifecycle.prepare_default()
+            stop.assert_called_once_with('emulator-5554')
+            self.assertEqual(thread.call_args.kwargs['args'], ('Current_Phone_API_37', True))
 
     def test_stream_defaults_to_720_and_windows_discovery(self):
         with patch.dict('emulator.os.environ', {}, clear=True):

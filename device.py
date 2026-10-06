@@ -93,6 +93,15 @@ def boot_completed(serial):
         return False
 
 
+def console_alive(serial):
+    """The host-side console answers while the guest is busy; only a hung emulator loses it."""
+    try:
+        adb(serial, 'emu', 'avd', 'name', timeout=5)
+        return True
+    except ValueError:
+        return False
+
+
 def stop(serial):
     try:
         adb(serial, 'emu', 'kill', timeout=5)
