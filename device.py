@@ -142,13 +142,14 @@ def boot(name):
             '-memory', _number_setting('PLIPA_EMULATOR_MEMORY_MB', 3072, 1024, 4096),
             '-no-snapshot',  # Quickboot never restored on the home server; skip snapshot load and save.
             '-grpc-use-token']
-    # Keep this and the previous boot's output: a crash is usually followed by a re-prepare.
-    log_path = Path(tempfile.gettempdir())/'plipa-emulator.log'
-    try:
-        os.replace(log_path, log_path.with_suffix('.prev.log'))
-    except OSError:
-        pass  # No previous log, or a dying emulator still holds it on Windows.
-    with open(log_path, 'wb') as log:
+    # One file per boot: a re-prepare starts while the crashed emulator still holds its log on Windows.
+    logs = Path(tempfile.gettempdir())
+    for old in sorted(logs.glob('plipa-emulator-*.log'))[:-2]:
+        try:
+            old.unlink()
+        except OSError:
+            pass  # Still held by a dying emulator; removed on a later boot.
+    with open(logs/time.strftime('plipa-emulator-%Y%m%d-%H%M%S.log'), 'wb') as log:
         subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     threading.Thread(target=_optimize_when_ready, args=(name,), daemon=True).start()
     return name

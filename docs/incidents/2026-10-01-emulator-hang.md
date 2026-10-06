@@ -65,7 +65,7 @@ fix: 5f976b7
   - `device.stop()`: 콘솔 종료가 실패하면 discovery 파일의 PID를 직접 종료하고 파일을 지운다.
   - `EmulatorLifecycle.status()`: `ready`인데 응답이 없으면 `error`로 바꿔 다시 준비 버튼을 노출한다.
   - `EmulatorLifecycle.prepare()`: 부팅되지 않은 기존 에뮬레이터를 먼저 종료한 뒤 새로 띄운다.
-  - adb 상태 확인 timeout을 5초로 줄였다. 마지막 부팅 출력은 사용자 임시 폴더의 `plipa-emulator.log`에 남긴다.
+  - adb 상태 확인 timeout을 5초로 줄였다. 부팅 출력은 사용자 임시 폴더에 부팅마다 `plipa-emulator-<시각>.log`로 남기고 최근 3개를 보존한다.
   - 회귀 테스트: `test_hung_emulator_is_named_stopped_and_reported`
 
 ## 런북: 같은 증상이 다시 보일 때
@@ -94,11 +94,11 @@ Windows 홈서버에서 PowerShell로 실행한다. 프로세스는 명령줄을
    Start-ScheduledTask 'Plipa Server'
    Get-NetTCPConnection -LocalPort 4317 -State Listen   # 리스너 1개 확인
    ```
-4. **원인 수집.** 다시 멈췄다면 정리하기 전에 `%TEMP%\plipa-emulator.log`와 Application 로그의 Application Error를 먼저 확보한다.
+4. **원인 수집.** 다시 멈췄다면 정리하기 전에 `%TEMP%\plipa-emulator-*.log`와 Application 로그의 Application Error를 먼저 확보한다.
 
 ## 미해결
 
-- 10-01 15:13에 처음 크래시가 난 원인은 미확인이다. 다음 발생 시 `plipa-emulator.log`와 `plipa-emulator.prev.log`로 확인한다.
+- 10-01 15:13에 처음 크래시가 난 원인은 미확인이다. 다음 발생 시 사용자 임시 폴더의 `plipa-emulator-<시각>.log`(최근 3개 보존)로 확인한다.
 - 콘솔은 살아 있는데 게스트만 영구히 멈춘 경우는 재준비가 종료하지 않고 기다리기만 한다(코드의 `ponytail:` 주석).
 - 예약 작업을 멈춰도 자식 python이 남는 구조는 그대로다. 런북 3단계로 수동 정리한다.
 - 에뮬레이터 부팅 출력에 비밀값이 포함되는지는 미확인이다. 로그는 사용자 전용 임시 폴더에만 둔다.

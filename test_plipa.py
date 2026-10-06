@@ -147,6 +147,19 @@ class PlipaTest(unittest.TestCase):
         self.assertEqual(args[args.index('-memory') + 1], '3072')
         thread.return_value.start.assert_called_once()
 
+    def test_emulator_boot_keeps_recent_logs_per_boot(self):
+        logs = Path(self.temp.name)
+        for stamp in ('20261001-000000', '20261002-000000', '20261003-000000'):
+            (logs/f'plipa-emulator-{stamp}.log').write_text(stamp, encoding='utf-8')
+        with patch('device.avds', return_value=['Flippa_API_33']), \
+             patch('device.tempfile.gettempdir', return_value=str(logs)), \
+             patch('device.time.strftime', return_value='plipa-emulator-20261004-000000.log'), \
+             patch('device.subprocess.Popen'), patch('device.threading.Thread'):
+            device.boot('Flippa_API_33')
+        self.assertEqual(sorted(p.name for p in logs.glob('plipa-emulator-*.log')),
+                         ['plipa-emulator-20261002-000000.log', 'plipa-emulator-20261003-000000.log',
+                          'plipa-emulator-20261004-000000.log'])
+
     def test_default_emulator_preparation_is_idempotent_and_reports_ready(self):
         lifecycle = EmulatorLifecycle('Current_Phone_API_37')
         worker = Mock()
