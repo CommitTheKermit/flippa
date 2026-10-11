@@ -59,14 +59,22 @@ async function refresh(){
   $('aiModel').disabled=aiBusy;$('aiReasoning').disabled=aiBusy;
   $('aiState').textContent=!state.ai_allowed?'소유자가 AI 사용을 중지했습니다.':state.queue_position?'다른 요청 종료 후 실행 · 대기 '+state.queue_position+'번째':state.running?'확인 중 · 남은 호출 '+state.steps_left+'회':state.pending?'사용자 확인을 기다립니다.':'요청당 최대 '+state.step_limit+'회 · 이미지 전송 없음';
 }
+function aiControlsDevice(){return !!(state.running || state.pending);}
 function updateDeviceControls(){
-  const interactive=!!state.session;
+  const aiControl=aiControlsDevice();
+  const interactive=!!state.session && !aiControl;
+  $('screenWrap').classList.toggle('ai-controlled',aiControl);
+  $('deviceControlStatus').hidden=!aiControl;
+  $('deviceControlStatus').textContent=state.pending?'AI 승인 대기 중 · 화면 입력 잠김':state.queue_position?'AI 실행 대기 중 · 화면 입력 잠김':'AI 조작 중 · 화면 입력 잠김';
+  screen.setAttribute('aria-disabled',String(!interactive));
+  screen.tabIndex=interactive?0:-1;
+  if(!interactive && document.activeElement===screen)screen.blur();
   $('launch').disabled=!interactive;
   document.querySelectorAll('[data-key]').forEach(button=>button.disabled=!interactive);
   document.querySelectorAll('[data-scroll]').forEach(button=>button.disabled=!interactive);
   $('input').disabled=!interactive;
   $('inputForm').querySelector('button').disabled=!interactive;
-  $('screenHint').textContent=interactive?'실시간 화면 · 클릭·드래그·영문 키보드로 조작하세요. 한글 입력은 에뮬레이터 키보드를 사용하세요.':'읽기 전용 미리보기입니다. 테스트를 시작하면 조작과 기록이 활성화됩니다.';
+  $('screenHint').textContent=aiControl?'AI가 화면을 사용하고 있습니다. 화면을 보며 진행 상황을 확인할 수 있고, 중지 후 직접 조작할 수 있습니다.':interactive?'실시간 화면 · 클릭·드래그·영문 키보드로 조작하세요. 한글 입력은 에뮬레이터 키보드를 사용하세요.':'읽기 전용 미리보기입니다. 테스트를 시작하면 조작과 기록이 활성화됩니다.';
 }
 function updateScreenSize(){
   if(!screen.width || !screen.height)return;
@@ -157,7 +165,7 @@ $('debugRead').onclick=()=>task(async()=>{
 $('refresh').onclick=()=>task(refreshDevices);
 $('prepare').onclick=()=>task(async()=>{await api('prepare',{});await refreshDevices();notice('기본 에뮬레이터 준비를 다시 시작했습니다.');});
 $('load').onclick=()=>task(async()=>{await api('load',{id:$('sessions').value});selected.clear();notice('이전 기록을 열었습니다.');});
-$('launch').onclick=()=>task(()=>api('launch',{}));
+$('launch').onclick=()=>{if(!state.session || aiControlsDevice())return;task(()=>api('launch',{}));};
 $('zoomOut').onclick=()=>changeScreenZoom(-1);
 $('zoomIn').onclick=()=>changeScreenZoom(1);
 $('zoomReset').onclick=()=>{screenZoom=1;$('screenWrap').scrollTo({left:0,top:0});updateScreenSize();};
@@ -172,7 +180,7 @@ $('approve').onclick=()=>task(()=>api('approve',{id:state.pending?.id,approved:t
 $('reject').onclick=()=>task(()=>api('approve',{id:state.pending?.id,approved:false}));
 const androidKeys={BACK:'GoBack',HOME:'GoHome',ENTER:'Enter',DEL:'Backspace'};
 document.querySelectorAll('[data-key]').forEach(b=>b.onclick=()=>queueKey(androidKeys[b.dataset.key]));
-$('inputForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('manual',{kind:'text',text:$('input').value});$('input').value='';});};
+$('inputForm').onsubmit=e=>{e.preventDefault();if(!state.session || aiControlsDevice())return;task(async()=>{await api('manual',{kind:'text',text:$('input').value});$('input').value='';});};
 function coords(e){const r=screen.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}
 function enqueue(input){
   // Keep only the newest unsent move; preserve down/up ordering.
