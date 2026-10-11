@@ -180,6 +180,8 @@ def tree(serial):
         text = redact(a.get('text', '') or a.get('content-desc', ''))
         nodes.append({'id': len(nodes), 'text': text, 'bounds': bounds,
                       'resource': a.get('resource-id', ''), 'package': a.get('package', ''),
+                      'class': a.get('class', ''), 'focused': a.get('focused') == 'true',
+                      'editable': a.get('class', '').endswith('EditText'),
                       'clickable': a.get('clickable') == 'true', 'enabled': a.get('enabled') == 'true'})
     return nodes
 
@@ -210,6 +212,14 @@ def perform(serial, action, nodes=None):
         if not isinstance(coords, list) or len(coords) != count or any(type(v) is not int or not 0 <= v <= 10000 for v in coords):
             raise ValueError('잘못된 화면 좌표입니다.')
         args = [kind, *map(str, coords)] + (['350'] if kind == 'swipe' else [])
+    elif kind == 'scroll':
+        if action.get('text') not in ('up', 'down') or not nodes:
+            raise ValueError('스크롤 방향과 현재 화면 구조를 확인하세요.')
+        width = max(n['bounds'][2] for n in nodes)
+        height = max(n['bounds'][3] for n in nodes)
+        x, top, bottom = width//2, int(height*.3), int(height*.7)
+        start, end = (bottom, top) if action['text'] == 'down' else (top, bottom)
+        args = ['swipe', str(x), str(start), str(x), str(end), '350']
     elif kind == 'text':
         value = action.get('text', '')
         if not isinstance(value, str) or not value or len(value) > 300 or not value.isascii() or any(ord(c) < 32 for c in value):
@@ -247,3 +257,11 @@ def environment(serial, package):
             'android': adb(serial, 'shell', 'getprop', 'ro.build.version.release').strip(),
             'model': adb(serial, 'shell', 'getprop', 'ro.product.model').strip(),
             'app': '\n'.join(line.strip() for line in adb(serial, 'shell', 'dumpsys', 'package', package).splitlines() if 'versionName=' in line or 'versionCode=' in line)}
+
+
+def display_size(serial):
+    output = adb(serial, 'shell', 'wm', 'size')
+    sizes = re.findall(r'(\d+)x(\d+)', output)
+    if not sizes:
+        raise ValueError('화면 크기를 확인하지 못했습니다.')
+    return [int(v) for v in sizes[-1]]

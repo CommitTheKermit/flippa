@@ -45,14 +45,14 @@ class DebugTools:
                     attachments=[name], missing=[], fact=True)
         return result
 
-    def perform(self, action, nodes=None, actor='human', approved=False):
+    def perform(self, action, nodes=None, actor='human', approved=False, **links):
         device.perform(self.session()['serial'], action, nodes)
         safe = dict(action)
         if safe.get('kind') == 'text':
             safe['text'] = '[입력 내용 기록 안 함]'
         return self.record('manual' if actor == 'human' else 'action',
                            '수동 조작' if actor == 'human' else 'AI 조작 실행',
-                           action=safe, actor=actor, approved=approved, fact=True)
+                           action=safe, actor=actor, approved=approved, fact=True, **links)
 
     def launch(self):
         s = self.session()

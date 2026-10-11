@@ -139,6 +139,9 @@ class SharedWorkbenchTest(unittest.TestCase):
             w.approve(w.pending['id'], True)
             perform.assert_called_once()
             self.assertEqual(planner.call_count, 1)
+            deadline = time.monotonic()+3
+            while w.running and time.monotonic() < deadline:
+                time.sleep(.01)
             self.assertFalse(w.running)
             self.assertIsNone(w.pending)
 

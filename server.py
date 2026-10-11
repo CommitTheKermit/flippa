@@ -25,6 +25,9 @@ except ImportError:
     ThreadingUnixStreamServer = None
 from access import AIGate, configured_users
 from debug_tools import DebugTools
+from qa import ScenarioStore, clean_text
+from qa_run import QARun
+import external_agent
 
 ROOT = Path(__file__).resolve().parent
 if sys.platform == 'win32':
@@ -55,7 +58,7 @@ class Workbench:
         self.root = root
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = threading.RLock()
-        self.operation = threading.Lock()
+        self.operation = threading.RLock()
         self.stop = threading.Event()
         self.running = False
         self.pending = None
@@ -71,6 +74,14 @@ class Workbench:
         self.steps_left = 0
         self.step_limit = max(1, min(12, int(os.environ.get('PLIPA_AI_STEPS', '6'))))
         self.consent_logs = False
+        self.qa_run = None
+        self.cleanup_thread = None
+        self.worker = None
+        self.scenarios = ScenarioStore(root)
+        self.external_enabled = False
+        self.external_screens = False
+        self.external_logs = False
+        self.external_autonomous = True
         self.debug = DebugTools(self.session, self.directory, self.event)
         self.managed_avds = set()
         self.last_emulator_activity = time.monotonic()
@@ -124,6 +135,13 @@ class Workbench:
 
     def close(self):
         self.shutdown.set()
+        self.cancel()
+        if self.worker and self.worker is not threading.current_thread():
+            self.worker.join(25)
+        if self.cleanup_thread:
+            self.cleanup_thread.join(5)
+        if self.qa_run and not self.qa_run.finished:
+            self.qa_run.evidence.logs.close()
 
     def session(self):
         if not self.current:
@@ -168,11 +186,18 @@ class Workbench:
                     sessions.append(json.loads(path.read_text(encoding='utf-8')))
                 except (ValueError, OSError):
                     continue
+            events = self.events() if self.current else []
+            previous_result = next((e['result'] for e in reversed(events) if e.get('kind') == 'verdict' and 'result' in e), None)
             return {'session': self.current, 'sessions': sessions, 'running': self.running,
-                    'pending': self.pending, 'events': self.events() if self.current else [],
+                    'pending': self.pending, 'events': events,
                     'ai_allowed': self.ai_gate.allowed(self.user),
                     'queue_position': self.ai_gate.position(self.user),
-                    'steps_left': self.steps_left, 'step_limit': self.step_limit}
+                    'steps_left': self.steps_left, 'step_limit': self.step_limit,
+                    'scenarios': self.scenarios.list(), 'external_enabled': self.external_enabled,
+                    'external_screens': self.external_screens, 'external_logs': self.external_logs,
+                    'result': self.qa_run.result if self.qa_run else previous_result,
+                    'highlight': self.qa_run.highlight if self.qa_run else None,
+                    'external_running': bool(self.qa_run and self.qa_run.external and not self.qa_run.finished)}
 
     def start(self, serial, package, title):
         with self.lock:
@@ -190,6 +215,8 @@ class Workbench:
             folder = self.root/sid
             folder.mkdir(mode=0o700)
             self.release_pointer()
+            self.qa_run = None
+            self.external_enabled = False
             self.current = {'id': sid, 'title': title, 'serial': serial,
                             'package': package, 'created': now(), 'environment': env}
             save_json(folder/'session.json', self.current)
@@ -208,6 +235,8 @@ class Workbench:
             self.require_device(restored['serial'])
             self.release_pointer()
             self.current = restored
+            self.qa_run = None
+            self.external_enabled = False
 
     def capture(self, screen=False):
         s = self.session()
@@ -344,7 +373,8 @@ class Workbench:
                     self.release_pointer(viewer)
                     raise
 
-    def start_ai(self, goal, consent, consent_logs=False, model=None, reasoning_effort=None):
+    def start_ai(self, goal, consent, consent_logs=False, model=None, reasoning_effort=None,
+                 expected='', precondition='', consent_screens=False, autonomous=True):
         with self.lock:
             self.session()
             if consent is not True:
@@ -357,92 +387,113 @@ class Workbench:
             self.goal = text(goal, 3000)
             self.ai_model, self.ai_reasoning_effort = ai.settings(model, reasoning_effort)
             self.steps_left = self.step_limit
+            self.qa_run = QARun(self, clean_text(expected, optional=True), clean_text(precondition, optional=True),
+                                autonomous=autonomous is True, screens=consent_screens is True)
             self.consent_logs = consent_logs is True
             self.event('user', self.goal, external_ai_consent=True, logs_ai_consent=self.consent_logs,
                        ai_model=self.ai_model, ai_reasoning_effort=self.ai_reasoning_effort)
+            self.stop.clear()
             self._spawn()
 
     def _spawn(self):
-        self.stop.clear()
         self.running = True
-        threading.Thread(target=self._loop, daemon=True).start()
+        self.worker = threading.Thread(target=self._loop, daemon=True)
+        self.worker.start()
 
     def _loop(self):
         try:
             with self.ai_gate.slot(self.user, self.stop):
                 self._run_ai()
         except Exception as exc:
+            if self.qa_run and not self.qa_run.finished:
+                self.qa_run.finish(str(exc) if isinstance(exc, ValueError) else 'AI 실행 실패', verify=False)
             self.event('error', str(exc) if isinstance(exc, ValueError) else 'AI 실행 중 오류가 발생했습니다. 기록은 보존했습니다.')
         finally:
+            if self.qa_run and not self.qa_run.finished and not self.pending:
+                self.qa_run.finish('실행이 중지됐습니다.', verify=False)
             with self.lock:
                 self.running = False
 
     def _run_ai(self):
-        evidence = None
-        while self.steps_left > 0:
-            if self.stop.is_set():
-                return
-            with self.operation:
-                nodes = self.debug.read('ui', actor='ai')
-            history = [{'kind': e['kind'], 'message': e['message'], 'action': e.get('action')}
-                       for e in self.events() if e['kind'] in ('user', 'ai', 'action', 'error')]
-            if self.stop.is_set():
-                return
-            self.steps_left -= 1
-            action = ai.plan(self.goal, nodes, history, self.stop, evidence=evidence,
-                             logs_allowed=self.consent_logs, model=self.ai_model,
-                             reasoning_effort=self.ai_reasoning_effort)
-            with self.lock:
-                if self.stop.is_set():
-                    return
-                self.event('ai', action['message'], action=action, fact=False)
-                if action['kind'] == 'done':
-                    return
-                if action['kind'] not in ('logs', 'environment') and not device.auto_allowed(action):
-                    self.pending = {'id': uuid.uuid4().hex, 'action': action, 'nodes': nodes, 'created': now()}
-                    return
-            if action['kind'] in ('logs', 'environment'):
-                if action['kind'] == 'logs' and not self.consent_logs:
-                    self.event('system', '앱 로그 AI 전송 동의가 없어 중지했습니다. 동의 후 다시 요청하세요.')
-                    return
-                with self.operation:
-                    if self.stop.is_set():
-                        return
-                    evidence = {'tool': action['kind'], 'result': self.debug.read(action['kind'], actor='ai')}
-                continue
-            # observe is a request for another observation, never an executed input.
-            if self.stop.wait(1):
-                return
-        self.event('system', '요청의 AI 호출 한도에 도달했습니다. 기록을 확인한 뒤 다시 지시하세요.')
+        if self.qa_run is None or self.qa_run.finished:
+            self.qa_run = QARun(self, autonomous=False)
+        self.qa_run.run()
 
     def approve(self, pending_id, approved):
-        with self.operation, self.lock:
-            pending = self.pending
-            if not pending or pending_id != pending['id'] or self.running:
-                raise ValueError('현재 승인 대기 조작이 아닙니다.')
-            if approved is True and not self.ai_gate.allowed(self.user):
-                raise ValueError('소유자가 AI 사용을 제한했습니다.')
-            self.pending = None
+        with self.operation:
+            with self.lock:
+                pending = self.pending
+                if not pending or pending_id != pending['id'] or self.running:
+                    raise ValueError('현재 승인 대기 조작이 아닙니다.')
+                if approved is True and not self.ai_gate.allowed(self.user):
+                    raise ValueError('소유자가 AI 사용을 제한했습니다.')
+                self.pending = None
+                self.running = True
+                run = self.qa_run
             if approved is not True:
                 self.event('system', '사용자가 조작을 취소했습니다.')
+                if run:
+                    run.finish('사용자가 조작을 취소했습니다.', verify=False)
+                self.running = False
                 return
-            fresh = device.tree(self.session()['serial'])
-            if fresh != pending['nodes']:
-                self.event('system', '화면이 변경되어 승인을 폐기했습니다.')
-                raise ValueError('화면이 달라졌습니다. AI에 다시 지시하세요.')
-            action = pending['action']
-            self.debug.perform(action, fresh, actor='ai', approved=True)
-            if self.steps_left > 0:
+            try:
+                fresh = device.tree(self.session()['serial'])
+                if fresh != pending['nodes']:
+                    raise ValueError('화면이 달라졌습니다. AI에 다시 지시하세요.')
+                if run:
+                    run.execute(pending['action'], fresh, approved=True)
+                else:
+                    self.debug.perform(pending['action'], fresh, actor='ai', approved=True)
+            except Exception:
+                if run:
+                    run.finish('승인 조작 실행 실패', verify=False)
+                self.running = False
+                raise
+            if self.stop.is_set():
+                if run:
+                    run.finish('사용자가 테스트를 중지했습니다.', verify=False)
+                self.running = False
+                return
+            if run and run.external:
+                self.running = True
+                run.renew()
+            elif self.steps_left > 0:
                 self._spawn()
+            elif run:
+                # Final verification is independent of the action budget.
+                self.running = True
+                self.worker = threading.Thread(target=self._finish_after_approval, daemon=True)
+                self.worker.start()
             else:
-                self.event('system', '승인한 조작을 실행했습니다. AI 호출 한도에 도달해 추가 판단은 실행하지 않았습니다.')
+                self.running = False
+
+    def _finish_after_approval(self):
+        try:
+            with self.ai_gate.slot(self.user, self.stop):
+                self.qa_run.finish('마지막 승인 조작 후 검증')
+        except ValueError as exc:
+            self.qa_run.finish(str(exc), verify=False)
+        finally:
+            self.running = False
 
     def cancel(self):
         with self.lock:
             self.stop.set()
             self.pending = None
+            run = self.qa_run
             if self.current:
                 self.event('system', 'AI 중지 요청. 실행 전인 조작을 취소했습니다.')
+            if run and not run.finished and (run.external or not self.running):
+                self.running = True
+                self.cleanup_thread = threading.Thread(target=self._finish_cancelled, args=(run,), daemon=True)
+                self.cleanup_thread.start()
+
+    def _finish_cancelled(self, run):
+        with self.operation:
+            run.finish('사용자가 테스트를 중지했습니다.', verify=False)
+            with self.lock:
+                if self.qa_run is run:
+                    self.running = False
 
     def export(self, data):
         with self.lock:
@@ -454,7 +505,8 @@ class Workbench:
             if len(selected) != len(set(ids)):
                 raise ValueError('존재하지 않는 기록이 선택됐습니다.')
             linked = {e['step_id'] for e in selected if e.get('step_id')}
-            selected = [e for e in events if e['id'] in ids or e['id'] in linked]
+            linked.update(e['id'] for e in selected if e['kind'] == 'step')
+            selected = [e for e in events if e['id'] in ids or e['id'] in linked or e.get('step_id') in linked]
             report = {'title': text(data.get('title'), 120), 'steps': text(data.get('steps')),
                       'expected': text(data.get('expected')), 'actual': text(data.get('actual'))}
             bundle = io.BytesIO()
@@ -479,7 +531,7 @@ class Workbench:
                 z.writestr('manifest.json', json.dumps({'format': 'plipa.qa.v1', 'created': now(),
                     'environment': self.session()['environment'], 'event_ids': [e['id'] for e in selected], 'attachments': files,
                     'missing': ['네트워크 본문, 녹화, 성능 트레이스, 앱 내부 상태는 첫 버전 미수집',
-                                '로그캣은 수집 버튼 시점의 앱 PID 최근 200줄 표본',
+                                '수동 로그 조회는 PID 최근 200줄 표본, AI 실행은 UID 지속 로그와 수집 누락 참고',
                                 '플리파 외부에서 한 조작은 타임라인에 자동 기록되지 않음'],
                     'sharing': '사용자가 선택한 동료 공유용 파일. 외부 AI 전송 허가와 별개.'}, ensure_ascii=False, indent=2))
             return bundle.getvalue()
@@ -712,7 +764,34 @@ class Handler(BaseHTTPRequestHandler):
                 w.cancel()
             else:
                 with w.operation:
-                    if path == '/api/start':
+                    if path == '/api/scenarios/save':
+                        return self.reply(w.scenarios.save(data, w.session()['package']))
+                    elif path == '/api/scenarios/run':
+                        scenario = w.scenarios.get(data.get('id'))
+                        if scenario['package'] != w.session()['package']:
+                            raise ValueError('시나리오와 현재 테스트 앱이 다릅니다.')
+                        w.start_ai(scenario['goal'], data.get('consent'), data.get('consent_logs'),
+                                   data.get('model'), data.get('reasoning_effort'), expected=scenario['expected'],
+                                   precondition=scenario['precondition'], consent_screens=data.get('consent_screens'),
+                                   autonomous=data.get('autonomous', True))
+                    elif path == '/api/agent/settings':
+                        if self.user != 'local':
+                            raise ValueError('MCP는 로컬 단일 사용자 작업실에서 지원합니다.')
+                        if w.running or w.pending:
+                            raise ValueError('실행을 중지한 뒤 MCP 설정을 변경하세요.')
+                        w.session()
+                        if data.get('enabled') is True and data.get('consent') is not True:
+                            raise ValueError('현재 UI 텍스트의 외부 AI 전송에 동의하세요.')
+                        w.ai_model, w.ai_reasoning_effort = ai.settings(data.get('model'), data.get('reasoning_effort'))
+                        w.external_enabled = data.get('enabled') is True
+                        w.external_screens = data.get('consent_screens') is True
+                        w.external_logs = data.get('consent_logs') is True
+                        w.external_autonomous = data.get('autonomous', True) is True
+                    elif path == '/api/agent':
+                        if self.user != 'local':
+                            raise ValueError('로컬 작업실에서만 MCP를 사용할 수 있습니다.')
+                        return self.reply(external_agent.dispatch(w, data))
+                    elif path == '/api/start':
                         w.start(data.get('serial'), data.get('package'), data.get('title'))
                     elif path == '/api/load':
                         w.load(data.get('id'))
@@ -745,7 +824,9 @@ class Handler(BaseHTTPRequestHandler):
                         return self.reply({'result': w.debug.read(data.get('tool'))})
                     elif path == '/api/chat':
                         w.start_ai(data.get('goal'), data.get('consent'), data.get('consent_logs'),
-                                   data.get('model'), data.get('reasoning_effort'))
+                                   data.get('model'), data.get('reasoning_effort'),
+                                   expected=data.get('expected', ''), precondition=data.get('precondition', ''),
+                                   consent_screens=data.get('consent_screens'), autonomous=data.get('autonomous', True))
                     elif path == '/api/note':
                         w.event('note', text(data.get('message')), fact=False)
                     elif path == '/api/export':
