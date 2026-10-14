@@ -22,6 +22,7 @@ class PlipaTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.w = Workbench(Path(self.temp.name))
+        self.addCleanup(self.w.close)
         self.w.current = {'id': 'test', 'serial': 'emulator-5554', 'package': device.PACKAGE,
                           'title': '테스트', 'environment': {'package': device.PACKAGE}}
         self.w.directory().mkdir()
@@ -71,6 +72,7 @@ class PlipaTest(unittest.TestCase):
             self.w.cancel()
             self.assertIsNone(self.w.pending)
             self.assertTrue(self.w.stop.is_set())
+            self.w.close()
 
     def test_ai_request_uses_validated_model_and_reasoning(self):
         with patch.object(self.w, '_spawn'):
