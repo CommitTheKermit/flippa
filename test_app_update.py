@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -14,7 +15,8 @@ class AppUpdaterTest(unittest.TestCase):
         self.repo = Path(self.temp.name)/'chaekchaek'
         (self.repo/'.git').mkdir(parents=True)
         (self.repo/'android').mkdir()
-        (self.repo/'android'/'gradlew').write_text('wrapper')
+        self.wrapper = self.repo/'android'/('gradlew.bat' if os.name == 'nt' else 'gradlew')
+        self.wrapper.write_text('wrapper')
         apk = self.repo/'android/app/build/outputs/apk/debug/app-debug.apk'
         apk.parent.mkdir(parents=True)
         apk.write_bytes(b'apk')
@@ -51,7 +53,7 @@ class AppUpdaterTest(unittest.TestCase):
                          ('done', 'fed987cba654', True))
         command.assert_called_once()
         self.assertEqual(command.call_args.args[:2],
-                         ([str(updater.repo/'android/gradlew'), ':app:assembleDebug',
+                         ([str(self.wrapper), ':app:assembleDebug',
                            '--console=plain', '--no-daemon'], updater.repo/'android'))
         adb.assert_called_once_with('emulator-5554', 'install', '-r', str(updater.repo/updater.apk), timeout=300)
         launch.assert_called_once_with('emulator-5554', 'com.chamsae.chaekchaek')
