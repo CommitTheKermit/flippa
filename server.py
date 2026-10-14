@@ -28,6 +28,7 @@ from debug_tools import DebugTools
 from qa import ScenarioStore, clean_text
 from qa_run import QARun
 import external_agent
+from app_update import AppUpdater
 
 ROOT = Path(__file__).resolve().parent
 if sys.platform == 'win32':
@@ -628,7 +629,11 @@ class Handler(BaseHTTPRequestHandler):
                 registry = getattr(self.server, 'workspaces', None)
                 return self.reply({**self.workbench.state(), 'csrf': self.csrf,
                     'user': self.user, 'role': self.role,
-                    'members': registry.members() if registry and self.role == 'owner' else []})
+                    'members': registry.members() if registry and self.role == 'owner' else [],
+                    'app_update': (self.server.app_updater.status()
+                                   if self.role == 'owner' and hasattr(self.server, 'app_updater') else
+                                   {'available': False, 'running': False, 'phase': 'idle',
+                                    'message': '업데이트할 앱이 설정되지 않았습니다.'})})
             if path == '/api/devices':
                 allowed = self.workbench.allowed_devices
                 preparation = (self.server.emulators.status()
@@ -810,6 +815,16 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError('자동 준비 기능을 사용할 수 없습니다.')
                         prepared = self.server.emulators.prepare_default()
                         w.manage_emulator(prepared['name'])
+                    elif path == '/api/app/update':
+                        if self.role != 'owner':
+                            raise ValueError('소유자만 앱을 업데이트할 수 있습니다.')
+                        if w.running or w.pending:
+                            raise ValueError('AI 테스트를 중지한 뒤 앱을 업데이트하세요.')
+                        if not hasattr(self.server, 'app_updater'):
+                            raise ValueError('서버에 앱 저장소를 먼저 설정하세요.')
+                        serial = data.get('serial')
+                        w.require_device(serial)
+                        return self.reply(self.server.app_updater.start(serial))
                     elif path == '/api/launch':
                         if w.running or w.pending:
                             raise ValueError('AI를 중지한 뒤 앱을 실행하세요.')
@@ -872,6 +887,7 @@ def main():
     server.public_origin = origin
     server.workspaces = Workspaces(DATA, users)
     server.emulators = EmulatorLifecycle()
+    server.app_updater = AppUpdater()
     print(f'플리파 {origin}', flush=True)
     import sys
     if '--open' in sys.argv and not socket_path:

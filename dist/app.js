@@ -25,6 +25,13 @@ async function refresh(){
   $('identity').textContent=state.user+' · '+(state.role==='owner'?'소유자':'테스터');
   $('membersOpen').hidden=state.role!=='owner';
   $('boot').disabled=state.role!=='owner';
+  const appUpdate=state.app_update||{available:false,running:false,phase:'idle',message:''};
+  $('appUpdate').hidden=state.role!=='owner'||!appUpdate.available;
+  $('appUpdateSource').textContent=appUpdate.available?appUpdate.name+' · '+appUpdate.branch+(appUpdate.revision?' · '+appUpdate.revision:''):'';
+  $('appUpdateMessage').textContent=(appUpdate.message||'')+(appUpdate.installed?' · '+appUpdate.installed.replace(/\s+/g,' ').trim():'');
+  $('appUpdate').dataset.phase=appUpdate.phase;
+  $('appUpdateRun').disabled=!!(appUpdate.running||state.running||state.pending||!$('devices').value);
+  $('appUpdateRun').textContent=appUpdate.running?'업데이트 진행 중':'최신 APK 빌드·설치';
   const members=JSON.stringify(state.members);
   if(members!==lastMembers){lastMembers=members;$('memberList').replaceChildren();for(const member of state.members||[]){
     const row=node('div',undefined,'row member');
@@ -178,6 +185,7 @@ $('debugRead').onclick=()=>task(async()=>{
   $('attachment').showModal();notice('조회 결과를 타임라인에 남겼습니다.');
 });
 $('refresh').onclick=()=>task(refreshDevices);
+$('appUpdateRun').onclick=()=>task(async()=>{const serial=$('devices').value;if(!serial)throw new Error('설치할 에뮬레이터를 선택하세요.');await api('app/update',{serial});notice('책췍 소스 갱신과 APK 설치를 시작했습니다. 진행 상태는 위에서 확인할 수 있습니다.');});
 $('prepare').onclick=()=>task(async()=>{await api('prepare',{});await refreshDevices();notice('기본 에뮬레이터 준비를 다시 시작했습니다.');});
 $('load').onclick=()=>task(async()=>{await api('load',{id:$('sessions').value});selected.clear();notice('이전 기록을 열었습니다.');});
 $('launch').onclick=()=>{if(!state.session || aiControlsDevice())return;task(()=>api('launch',{}));};

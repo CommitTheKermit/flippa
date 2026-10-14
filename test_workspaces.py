@@ -46,6 +46,13 @@ class SharedWorkbenchTest(unittest.TestCase):
         server = PrivateHTTPServer(self.sock_path, Handler)
         server.origin = 'https://plipa.test'
         server.workspaces = self.registry
+        server.app_updater = Mock()
+        server.app_updater.status.return_value = {'available': True, 'running': False,
+                                                   'phase': 'idle', 'name': '책췍',
+                                                   'branch': 'an-develop', 'message': '준비'}
+        server.app_updater.start.return_value = {'available': True, 'running': True,
+                                                  'phase': 'fetching', 'message': '갱신 중'}
+        self.server = server
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -100,6 +107,14 @@ class SharedWorkbenchTest(unittest.TestCase):
         restored.boards['tester'].load('tester-test')
         self.assertFalse(restored.boards['tester'].running)
         self.assertEqual(restored.boards['tester'].events()[0]['message'], 'tester-only')
+
+    @unittest.skipUnless(PrivateHTTPServer.supported, 'Unix socket server unavailable')
+    def test_only_owner_can_start_configured_app_update(self):
+        self.start_http()
+        self.assertFalse(self.request('tester', '/api/state')[1]['app_update']['available'])
+        self.assertEqual(self.request('tester', '/api/app/update', {'serial':'emulator-5556'})[0], 400)
+        self.assertEqual(self.request('owner', '/api/app/update', {'serial':'emulator-5554'})[0], 200)
+        self.server.app_updater.start.assert_called_once_with('emulator-5554')
 
     @unittest.skipUnless(PrivateHTTPServer.supported, 'Unix socket server unavailable')
     def test_people_and_ai_read_same_debug_evidence_with_log_consent(self):
