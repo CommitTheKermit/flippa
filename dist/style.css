@@ -26,4 +26,5 @@
 .run-result button{display:block;font-size:11px;padding:4px 8px;margin-top:6px}
 
 .app-update{display:grid;grid-template-columns:minmax(190px,auto) 1fr auto;align-items:center;gap:18px;background:white;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.app-update details p{white-space:pre-wrap;overflow-wrap:anywhere}.app-update summary{font-size:11px;cursor:pointer}.app-update[data-phase="signature_mismatch"]{border-color:#e3a18f}#appReinstallWarning{color:#933c20}#appReinstallConfirm{background:#933c20;color:white;border-color:#933c20}
 .app-update div{display:grid;gap:2px}.app-update strong{font-size:13px}.app-update span,.app-update p{font-size:11px;color:var(--muted);margin:0}.app-update[data-phase="done"]{border-color:#83b994}.app-update[data-phase="error"]{border-color:#e3a18f}.app-update[data-phase="error"] p{color:#933c20}@media(max-width:700px){.app-update{grid-template-columns:1fr}.app-update button{width:100%}}

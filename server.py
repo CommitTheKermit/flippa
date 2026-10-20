@@ -757,18 +757,29 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('JSON 객체가 필요합니다.')
             w = self.workbench
             path = urlsplit(self.path).path
+            def require_install_idle():
+                update = self.server.app_updater.status() if hasattr(self.server, 'app_updater') else {}
+                if (update.get('running') and path in (
+                        '/api/start', '/api/chat', '/api/scenarios/run', '/api/agent',
+                        '/api/manual', '/api/input', '/api/launch', '/api/agent/settings') and
+                        (data.get('serial') == update.get('serial') or
+                         (w.current and w.current['serial'] == update.get('serial')))):
+                    raise ValueError('앱 설치가 끝난 뒤 테스트와 기기 조작을 시작하세요.')
             if path == '/api/admin/ai':
                 self.server.workspaces.control(self.user, data.get('user'), data.get('allowed'))
             elif path == '/api/stream':
                 return self.stream(data)
             elif path == '/api/input':
-                w.live_input(data)
+                with w.operation:
+                    require_install_idle()
+                    w.live_input(data)
             elif path == '/api/approve':
                 w.approve(data.get('id'), data.get('approved'))
             elif path == '/api/stop':
                 w.cancel()
             else:
                 with w.operation:
+                    require_install_idle()
                     if path == '/api/scenarios/save':
                         return self.reply(w.scenarios.save(data, w.session()['package']))
                     elif path == '/api/scenarios/run':
@@ -815,7 +826,7 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError('자동 준비 기능을 사용할 수 없습니다.')
                         prepared = self.server.emulators.prepare_default()
                         w.manage_emulator(prepared['name'])
-                    elif path == '/api/app/update':
+                    elif path in ('/api/app/update', '/api/app/reinstall'):
                         if self.role != 'owner':
                             raise ValueError('소유자만 앱을 업데이트할 수 있습니다.')
                         if w.running or w.pending:
@@ -824,6 +835,9 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError('서버에 앱 저장소를 먼저 설정하세요.')
                         serial = data.get('serial')
                         w.require_device(serial)
+                        if path == '/api/app/reinstall':
+                            return self.reply(self.server.app_updater.confirm_reinstall(
+                                serial, data.get('token'), data.get('delete_data')))
                         return self.reply(self.server.app_updater.start(serial))
                     elif path == '/api/launch':
                         if w.running or w.pending:

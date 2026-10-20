@@ -7,6 +7,7 @@ let streamControl, binding, gesture, inputBusy = false, inputs = [];
 let scrollBusy = false, queuedScrollDirection = '', wheelScrollDirection = '', wheelScrollTimer;
 let deviceState = {phase:'idle',message:'기본 에뮬레이터를 확인하고 있습니다.'}, previewSerial = '';
 let lastPreparationPhase = '';
+let reinstallRequest = null;
 const screen = $('screen');
 const zoomSteps = [.75, 1, 1.25, 1.5, 1.75, 2];
 let screenZoom = 1;
@@ -31,7 +32,15 @@ async function refresh(){
   $('appUpdateMessage').textContent=(appUpdate.message||'')+(appUpdate.installed?' · '+appUpdate.installed.replace(/\s+/g,' ').trim():'');
   $('appUpdate').dataset.phase=appUpdate.phase;
   $('appUpdateRun').disabled=!!(appUpdate.running||state.running||state.pending||!$('devices').value);
-  $('appUpdateRun').textContent=appUpdate.running?'업데이트 진행 중':'최신 APK 빌드·설치';
+  $('startForm').querySelector('button[type="submit"],button:not([type])').disabled=!!appUpdate.running;
+  $('appUpdateRun').textContent=appUpdate.running?'업데이트 진행 중':'데이터 유지하며 최신 앱 설치';
+  $('appUpdateSigners').hidden=!appUpdate.signer_sha256;
+  $('appUpdateSignerDetails').textContent='새 APK SHA-256: '+(appUpdate.signer_sha256||'')+(appUpdate.installed_signer_sha256?'\n기존 앱 SHA-256: '+appUpdate.installed_signer_sha256:'');
+  $('appReinstallOpen').hidden=!(appUpdate.phase==='signature_mismatch'&&appUpdate.reinstall_token);
+  $('appReinstallOpen').disabled=!!(appUpdate.running||state.running||state.pending||$('devices').value!==appUpdate.serial);
+  if(reinstallRequest&&(appUpdate.reinstall_token!==reinstallRequest.token||$('devices').value!==reinstallRequest.serial)){
+    $('appReinstall').close();reinstallRequest=null;
+  }
   const members=JSON.stringify(state.members);
   if(members!==lastMembers){lastMembers=members;$('memberList').replaceChildren();for(const member of state.members||[]){
     const row=node('div',undefined,'row member');
@@ -47,9 +56,9 @@ async function refresh(){
   if(scenarios!==lastScenarios){lastScenarios=scenarios;const old=$('scenarioSelect').value;$('scenarioSelect').replaceChildren(new Option('시나리오 선택',''));for(const s of state.scenarios||[])$('scenarioSelect').add(new Option(s.title,s.id));$('scenarioSelect').value=old;}
   $('mcpToggle').textContent=state.external_enabled?'로컬 MCP 연결 해제':'로컬 MCP 연결 허용';
   $('mcpHint').textContent=state.external_enabled?'현재 MCP 전송: UI 텍스트'+(state.external_logs?' · 로그':'')+(state.external_screens?' · 이미지':'')+'. 변경하려면 연결을 해제한 뒤 다시 허용하세요.':'같은 컴퓨터의 Codex에서 연결합니다. 연결 허용 시 위 전송 선택을 적용합니다. 새 테스트나 재시작 시 해제됩니다.';
-  $('mcpToggle').disabled=!!(state.running||state.pending||!state.session);
+  $('mcpToggle').disabled=!!(appUpdate.running||state.running||state.pending||!state.session);
   $('scenarioSave').disabled=!state.session;
-  $('scenarioRun').disabled=!!(state.running||state.pending||!state.session);
+  $('scenarioRun').disabled=!!(appUpdate.running||state.running||state.pending||!state.session);
   const verdict=state.result;
   $('runResult').hidden=!verdict;
   if(verdict){$('runResult').dataset.verdict=verdict.verdict;$('runResult').textContent=({pass:'통과',fail:'실패',inconclusive:'확인 불가'}[verdict.verdict]||'확인 불가')+' · '+verdict.reason;if(verdict.evidence_ids?.length){const b=node('button','판정 근거 보기');b.type='button';b.onclick=()=>{const ids=new Set(verdict.evidence_ids);let first;for(const e of state.events){const row=document.getElementById('event-'+e.id)?.closest('.event');const match=ids.has(e.id)||ids.has(e.observation_id)||ids.has(e.step_id);row?.classList.toggle('verdict-evidence',match);if(match&&!first)first=row;}first?.scrollIntoView({behavior:'smooth',block:'center'});};$('runResult').append(b);}}
@@ -74,18 +83,18 @@ async function refresh(){
   }
   $('approval').hidden=!state.pending;
   if(state.pending){const a=state.pending.action;$('approvalText').textContent=(state.pending.reason||'')+'\n'+a.message+'\n'+JSON.stringify({조작:a.kind,대상:a.target,입력:a.text});}
-  const aiBusy=!!(state.running||state.pending);
+  const aiBusy=!!(appUpdate.running||state.running||state.pending);
   $('send').disabled=!!(aiBusy||!state.ai_allowed||!state.session);$('approve').disabled=state.running;
   $('aiModel').disabled=aiBusy;$('aiReasoning').disabled=aiBusy;
   $('aiState').textContent=!state.ai_allowed?'소유자가 AI 사용을 중지했습니다.':state.queue_position?'다른 요청 종료 후 실행 · 대기 '+state.queue_position+'번째':state.external_running?'외부 Codex에서 테스트 중 · 승인과 중지는 이 화면에서 할 수 있습니다.':state.running?'확인 중 · 남은 호출 '+state.steps_left+'회':state.pending?'사용자 확인을 기다립니다.':'조작 최대 '+state.step_limit+'회 + 최종 검증 1회';
 }
-function aiControlsDevice(){return !!(state.running || state.pending);}
+function aiControlsDevice(){return !!(state.running || state.pending || state.app_update?.running);}
 function updateDeviceControls(){
   const aiControl=aiControlsDevice();
   const interactive=!!state.session && !aiControl;
   $('screenWrap').classList.toggle('ai-controlled',aiControl);
   $('deviceControlStatus').hidden=!aiControl;
-  $('deviceControlStatus').textContent=state.pending?'AI 승인 대기 중 · 화면 입력 잠김':state.queue_position?'AI 실행 대기 중 · 화면 입력 잠김':'AI 조작 중 · 화면 입력 잠김';
+  $('deviceControlStatus').textContent=state.app_update?.running?'앱 설치 중 · 화면 입력 잠김':state.pending?'AI 승인 대기 중 · 화면 입력 잠김':state.queue_position?'AI 실행 대기 중 · 화면 입력 잠김':'AI 조작 중 · 화면 입력 잠김';
   screen.setAttribute('aria-disabled',String(!interactive));
   screen.tabIndex=interactive?0:-1;
   if(!interactive && document.activeElement===screen)screen.blur();
@@ -186,6 +195,28 @@ $('debugRead').onclick=()=>task(async()=>{
 });
 $('refresh').onclick=()=>task(refreshDevices);
 $('appUpdateRun').onclick=()=>task(async()=>{const serial=$('devices').value;if(!serial)throw new Error('설치할 에뮬레이터를 선택하세요.');await api('app/update',{serial});notice('책췍 소스 갱신과 APK 설치를 시작했습니다. 진행 상태는 위에서 확인할 수 있습니다.');});
+$('appReinstallOpen').onclick=()=>{
+  const update=state.app_update;
+  if(!update?.reinstall_token||update.serial!==$('devices').value)return;
+  reinstallRequest={serial:update.serial,token:update.reinstall_token};
+  $('appReinstallTarget').textContent=update.name+' ('+update.package+') / '+update.serial+' / 버전 '+update.installed_version+' → '+update.apk_version+' / 소스 '+update.revision;
+  $('appReinstallConsent').checked=false;$('appReinstallConfirm').disabled=true;
+  $('appReinstall').showModal();$('appReinstallCancel').focus();
+};
+$('appReinstallConsent').onchange=()=>{$('appReinstallConfirm').disabled=!$('appReinstallConsent').checked;};
+function cancelReinstall(){
+  const request=reinstallRequest;reinstallRequest=null;$('appReinstall').close();
+  if(request)task(()=>api('app/reinstall',{...request,delete_data:false}));
+}
+$('appReinstallCancel').onclick=cancelReinstall;
+$('appReinstall').oncancel=e=>{e.preventDefault();cancelReinstall();};
+$('appReinstallForm').onsubmit=e=>{
+  e.preventDefault();const request=reinstallRequest;
+  if(!request||!$('appReinstallConsent').checked)return;
+  if(request.serial!==$('devices').value){cancelReinstall();return;}
+  reinstallRequest=null;$('appReinstall').close();
+  task(async()=>{await api('app/reinstall',{...request,delete_data:true});notice('데이터 삭제 후 재설치를 시작했습니다. 진행 상태는 위에서 확인할 수 있습니다.');});
+};
 $('prepare').onclick=()=>task(async()=>{await api('prepare',{});await refreshDevices();notice('기본 에뮬레이터 준비를 다시 시작했습니다.');});
 $('load').onclick=()=>task(async()=>{await api('load',{id:$('sessions').value});selected.clear();notice('이전 기록을 열었습니다.');});
 $('launch').onclick=()=>{if(!state.session || aiControlsDevice())return;task(()=>api('launch',{}));};

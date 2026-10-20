@@ -13,17 +13,6 @@ from access import AIGate, configured_users
 from server import Handler, PrivateHTTPServer, Workspaces, save_json, server_configuration
 
 
-class UnixClient(http.client.HTTPConnection):
-    def __init__(self, path):
-        super().__init__('plipa.test', timeout=5)
-        self.path = path
-
-    def connect(self):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect(self.path)
-
-
 class SharedWorkbenchTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -52,26 +41,32 @@ class SharedWorkbenchTest(unittest.TestCase):
                                                    'branch': 'an-develop', 'message': '준비'}
         server.app_updater.start.return_value = {'available': True, 'running': True,
                                                   'phase': 'fetching', 'message': '갱신 중'}
+        server.app_updater.confirm_reinstall.return_value = {'phase': 'reinstalling', 'running': True}
         self.server = server
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
 
     def request(self, user, path, data=None, csrf=None, origin='https://plipa.test'):
-        client = UnixClient(self.sock_path)
         headers = {'Host': 'plipa.test', 'Origin': origin}
         if user:
             headers['X-Plipa-User'] = user
         if data is not None:
             headers.update({'Content-Type': 'application/json',
                             'X-Plipa-CSRF': csrf or self.registry.csrf.get(user, '')})
-        client.request('GET' if data is None else 'POST', path,
-                       None if data is None else json.dumps(data), headers)
-        response = client.getresponse()
-        payload = response.read()
-        status = response.status
-        client.close()
-        return status, json.loads(payload)
+        body = b'' if data is None else json.dumps(data).encode('utf-8')
+        headers['Content-Length'] = str(len(body))
+        method = 'GET' if data is None else 'POST'
+        wire = ('\r\n'.join([f'{method} {path} HTTP/1.1',
+                              *(f'{key}: {value}' for key, value in headers.items()), '', '']).encode('utf-8') + body)
+        # Send one small request so immediate auth rejection cannot race a separate body write.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(5)
+            client.connect(self.sock_path)
+            client.sendall(wire)
+            with http.client.HTTPResponse(client) as response:
+                response.begin()
+                return response.status, json.loads(response.read())
 
     @unittest.skipUnless(PrivateHTTPServer.supported, 'Unix socket server unavailable')
     def test_identity_csrf_record_and_device_isolation(self):
@@ -115,6 +110,32 @@ class SharedWorkbenchTest(unittest.TestCase):
         self.assertEqual(self.request('tester', '/api/app/update', {'serial':'emulator-5556'})[0], 400)
         self.assertEqual(self.request('owner', '/api/app/update', {'serial':'emulator-5554'})[0], 200)
         self.server.app_updater.start.assert_called_once_with('emulator-5554')
+
+    @unittest.skipUnless(PrivateHTTPServer.supported, 'Unix socket server unavailable')
+    def test_reinstall_requires_owner_csrf_allowed_device_and_stopped_ai(self):
+        self.start_http()
+        data = {'serial': 'emulator-5554', 'token': 'bound-confirmation', 'delete_data': True}
+        self.assertEqual(self.request('tester', '/api/app/reinstall', data)[0], 400)
+        self.assertEqual(self.request('owner', '/api/app/reinstall', data, csrf='wrong')[0], 403)
+        self.assertEqual(self.request('owner', '/api/app/reinstall', {**data, 'serial': 'emulator-5556'})[0], 400)
+        self.owner.running = True
+        self.assertEqual(self.request('owner', '/api/app/reinstall', data)[0], 400)
+        self.owner.running = False
+        self.server.app_updater.confirm_reinstall.assert_not_called()
+        self.assertEqual(self.request('owner', '/api/app/reinstall', data)[0], 200)
+        self.server.app_updater.confirm_reinstall.assert_called_once_with('emulator-5554', 'bound-confirmation', True)
+
+    @unittest.skipUnless(PrivateHTTPServer.supported, 'Unix socket server unavailable')
+    def test_installing_device_cannot_start_tests_or_receive_input(self):
+        self.start_http()
+        self.server.app_updater.status.return_value = {'running': True, 'serial': 'emulator-5554'}
+        for path, data in [('/api/start', {'serial': 'emulator-5554', 'package': 'com.example.test', 'title': 'test'}),
+                           ('/api/chat', {'goal': 'test', 'consent': True}),
+                           ('/api/input', {}), ('/api/launch', {})]:
+            with self.subTest(path=path):
+                status, response = self.request('owner', path, data)
+                self.assertEqual(status, 400)
+                self.assertIn('앱 설치가 끝난 뒤', response['error'])
 
     @unittest.skipUnless(PrivateHTTPServer.supported, 'Unix socket server unavailable')
     def test_people_and_ai_read_same_debug_evidence_with_log_consent(self):
