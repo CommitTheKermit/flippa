@@ -52,16 +52,44 @@ class ApkInspector:
         if not package:
             raise ValueError('APK의 패키지와 버전을 확인하지 못했습니다.')
         certificate = device.run([self._tool('apksigner'), 'verify', '--print-certs', str(apk)])
-        signers = sorted(set(re.findall(
-            r'(?:Signer #\d+|V\d+ Signer):? certificate SHA-256 digest: ([0-9a-fA-F]{64})', certificate)))
+        signers = sorted({s.lower() for s in re.findall(
+            r'(?:Signer #\d+|V\d+ Signer):? certificate SHA-256 digest: ([0-9a-fA-F]{64})', certificate)})
         if not signers:
             raise ValueError('APK 서명을 확인하지 못했습니다.')
         return {'package': package[1], 'version_code': int(package[2]),
-                'version_name': package[3], 'signer_sha256': ', '.join(s.lower() for s in signers)}
+                'version_name': package[3], 'signer_sha256': ', '.join(signers)}
+
+
+class ApkSigningPolicy:
+    """Allows only server-configured public certificate fingerprints."""
+
+    def __init__(self, fingerprints):
+        self.allowed = self._fingerprints(fingerprints) if fingerprints.strip() else frozenset()
+
+    @staticmethod
+    def _fingerprints(value):
+        fingerprints = []
+        for item in value.split(','):
+            fingerprint = item.strip()
+            if not (re.fullmatch(r'[0-9a-fA-F]{64}', fingerprint) or
+                    re.fullmatch(r'(?:[0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}', fingerprint)):
+                raise ValueError('서명 SHA-256 지문은 64자리 16진수 또는 콜론 구분 형식이어야 합니다.')
+            fingerprints.append(fingerprint.replace(':', '').lower())
+        return frozenset(fingerprints)
+
+    def require_configured(self):
+        if not self.allowed:
+            raise ValueError('서버에 PLIPA_APP_ALLOWED_SIGNER_SHA256 허용 서명 지문을 먼저 설정하세요.')
+
+    def require_allowed(self, metadata):
+        self.require_configured()
+        signers = self._fingerprints(metadata.get('signer_sha256', ''))
+        if not signers.issubset(self.allowed):
+            raise ValueError('빌드한 APK에 서버에서 허용하지 않은 서명이 있습니다. 설치하거나 앱을 삭제하지 않았습니다.')
 
 
 class AppUpdater:
-    """Updates one trusted checkout and installs its debug APK on one emulator."""
+    """Updates one trusted checkout and installs an allowed APK on one emulator."""
 
     def __init__(self, environ=None):
         settings = os.environ if environ is None else environ
@@ -81,6 +109,7 @@ class AppUpdater:
         self.package = settings.get('PLIPA_APP_PACKAGE', 'com.chamsae.chaekchaek').strip()
         if not re.fullmatch(r'[A-Za-z][\w]*(?:\.[\w]+)+', self.package):
             raise ValueError('PLIPA_APP_PACKAGE 형식이 올바르지 않습니다.')
+        self.signing_policy = ApkSigningPolicy(settings.get('PLIPA_APP_ALLOWED_SIGNER_SHA256', ''))
         self.lock = threading.Lock()
         self.worker = None
         self.inspector = ApkInspector()
@@ -89,9 +118,14 @@ class AppUpdater:
         self.current = self._base_status()
 
     def _base_status(self):
+        if self.repo is None:
+            message = '업데이트할 앱이 설정되지 않았습니다.'
+        elif not self.signing_policy.allowed:
+            message = '서버에 PLIPA_APP_ALLOWED_SIGNER_SHA256 허용 서명 지문을 먼저 설정하세요.'
+        else:
+            message = '최신 APK를 빌드할 수 있습니다.'
         return {'available': self.repo is not None, 'running': False, 'phase': 'idle',
-                'name': self.name, 'branch': self.branch, 'message':
-                '업데이트할 앱이 설정되지 않았습니다.' if self.repo is None else '최신 APK를 빌드할 수 있습니다.'}
+                'name': self.name, 'branch': self.branch, 'message': message}
 
     def status(self):
         with self.lock:
@@ -100,6 +134,7 @@ class AppUpdater:
     def start(self, serial):
         if self.repo is None:
             raise ValueError('서버에 앱 저장소를 먼저 설정하세요.')
+        self.signing_policy.require_configured()
         if not any(d['serial'] == serial and d['state'] == 'device' for d in device.devices()):
             raise ValueError('설치할 에뮬레이터를 선택하세요.')
         with self.lock:
@@ -197,8 +232,10 @@ class AppUpdater:
             if _sha256(apk) != candidate['apk_sha256']:
                 raise ValueError('확인한 APK가 바뀌었습니다. 앱을 삭제하지 않았습니다.')
             # Verify the signed artifact again before any destructive action.
-            if self.inspector.inspect(apk)['package'] != self.package:
+            metadata = self.inspector.inspect(apk)
+            if metadata['package'] != self.package:
                 raise ValueError('APK 패키지가 다릅니다. 앱을 삭제하지 않았습니다.')
+            self.signing_policy.require_allowed(metadata)
             if self._device_identity(serial) != candidate['device_identity']:
                 raise ValueError('설치 대상 기기가 바뀌었습니다. 앱을 삭제하지 않았습니다.')
             with tempfile.TemporaryDirectory(prefix='plipa-installed-') as directory:
@@ -278,6 +315,7 @@ class AppUpdater:
             metadata = self.inspector.inspect(snapshot)
             if metadata['package'] != self.package:
                 raise ValueError('빌드한 APK의 패키지가 설정과 다릅니다. 설치하지 않았습니다.')
+            self.signing_policy.require_allowed(metadata)
             self._set('installing', f'{serial}에 데이터를 유지하며 APK를 설치하고 있습니다.',
                       apk_bytes=snapshot.stat().st_size, apk_version=metadata['version_name'],
                       signer_sha256=metadata['signer_sha256'])

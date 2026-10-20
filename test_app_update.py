@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from app_update import ApkInspector, AppUpdater
+from app_update import ApkInspector, ApkSigningPolicy, AppUpdater
 
 
 class AppUpdaterTest(unittest.TestCase):
@@ -20,11 +20,12 @@ class AppUpdaterTest(unittest.TestCase):
         apk = self.repo/'android/app/build/outputs/apk/debug/app-debug.apk'
         apk.parent.mkdir(parents=True)
         apk.write_bytes(b'apk')
-        self.settings = {'PLIPA_APP_REPO': str(self.repo), 'PLIPA_APP_BRANCH': 'an-develop'}
+        self.settings = {'PLIPA_APP_REPO': str(self.repo), 'PLIPA_APP_BRANCH': 'an-develop',
+                         'PLIPA_APP_ALLOWED_SIGNER_SHA256': 'a' * 64}
         self.metadata = {'package': 'com.chamsae.chaekchaek', 'version_name': '1.3.0',
                          'version_code': 10, 'signer_sha256': 'a' * 64}
         inspector = patch('app_update.ApkInspector.inspect', return_value=self.metadata)
-        inspector.start()
+        self.inspect = inspector.start()
         self.addCleanup(inspector.stop)
 
     def wait(self, updater):
@@ -123,10 +124,11 @@ class AppUpdaterTest(unittest.TestCase):
              patch('app_update.device.devices', return_value=[{'serial':'emulator-5554','state':'device'}]), \
              patch.object(updater, '_installed_apk', side_effect=pull), \
              patch.object(updater, '_device_identity', return_value='0123456789abcdef'), \
-             patch('app_update.device.adb', side_effect=install_error), \
+             patch('app_update.device.adb', side_effect=install_error) as commands, \
              patch('app_update.device.launch'), patch('app_update.device.environment', return_value={'app': '1.3.0'}):
             updater.start('emulator-5554')
             self.wait(updater)
+        self.install_commands = commands
         return updater
 
     def mismatch(self):
@@ -155,6 +157,49 @@ class AppUpdaterTest(unittest.TestCase):
         self.assertIn('패키지', updater.status()['message'])
         self.assertEqual(updater.status()['phase'], 'error')
         self.assertIsNone(updater.candidate)
+        self.install_commands.assert_not_called()
+
+    def test_missing_allowed_signers_reports_configuration_and_blocks_update_before_device_or_source_access(self):
+        for value in ('', '   '):
+            with self.subTest(value=value):
+                updater = AppUpdater({**self.settings, 'PLIPA_APP_ALLOWED_SIGNER_SHA256': value})
+                self.assertTrue(updater.status()['available'])
+                self.assertIn('PLIPA_APP_ALLOWED_SIGNER_SHA256', updater.status()['message'])
+                with patch('app_update.device.devices') as devices, patch.object(updater, '_git') as git:
+                    with self.assertRaisesRegex(ValueError, 'PLIPA_APP_ALLOWED_SIGNER_SHA256'):
+                        updater.start('emulator-5554')
+                    devices.assert_not_called()
+                    git.assert_not_called()
+
+    def test_unapproved_or_missing_signers_stop_before_install_or_reinstall_offer(self):
+        for signers in ('b' * 64, 'a' * 64 + ', ' + 'b' * 64, '', 'invalid'):
+            with self.subTest(signers=signers):
+                self.metadata['signer_sha256'] = signers
+                updater = self.build(ValueError('INSTALL_FAILED_UPDATE_INCOMPATIBLE'))
+                self.assertEqual(updater.status()['phase'], 'error')
+                self.assertIsNone(updater.candidate)
+                self.assertIsNone(updater.artifact)
+                self.install_commands.assert_not_called()
+
+    def test_all_signers_must_be_allowed_and_colon_fingerprints_are_supported(self):
+        self.settings['PLIPA_APP_ALLOWED_SIGNER_SHA256'] = ':'.join(['AA'] * 32) + ', ' + 'b' * 64
+        self.metadata['signer_sha256'] = 'a' * 64 + ', ' + 'b' * 64
+        updater = self.build()
+        self.assertEqual(updater.status()['phase'], 'done')
+        self.install_commands.assert_called_once()
+
+    def test_unsigned_apk_stops_before_install_or_reinstall_offer(self):
+        self.inspect.side_effect = ValueError('APK 서명을 확인하지 못했습니다.')
+        updater = self.build()
+        self.assertEqual(updater.status()['phase'], 'error')
+        self.assertIsNone(updater.candidate)
+        self.assertIsNone(updater.artifact)
+        self.install_commands.assert_not_called()
+
+    def test_invalid_allowed_signer_configuration_never_enables_updates(self):
+        for value in ('sha256', 'a' * 64 + ',', 'a' * 63, 'a' * 65, '::' + 'a' * 64):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'SHA-256'):
+                AppUpdater({**self.settings, 'PLIPA_APP_ALLOWED_SIGNER_SHA256': value})
 
     def test_reinstall_rejects_unconfirmed_wrong_target_or_wrong_token(self):
         updater = self.mismatch()
@@ -241,6 +286,32 @@ class AppUpdaterTest(unittest.TestCase):
         launch.assert_not_called()
         self.assertIn('기기가 바뀌었', updater.status()['message'])
 
+    def test_reinstall_checks_allowed_signers_again_before_deletion(self):
+        updater = self.mismatch()
+        updater.signing_policy = ApkSigningPolicy('b' * 64)
+        command, launch, _ = self.reinstall(updater)
+        command.assert_not_called()
+        launch.assert_not_called()
+        self.assertEqual(updater.status()['phase'], 'error')
+        self.assertFalse(updater.status()['data_deleted'])
+        self.assertIn('허용하지 않은 서명', updater.status()['message'])
+
+    def test_reinstall_rejects_unverified_signature_or_wrong_package_before_deletion(self):
+        for failure in ('unsigned', 'wrong_package'):
+            with self.subTest(failure=failure):
+                self.inspect.side_effect = None
+                self.metadata['package'] = 'com.chamsae.chaekchaek'
+                updater = self.mismatch()
+                if failure == 'unsigned':
+                    self.inspect.side_effect = ValueError('APK 서명을 확인하지 못했습니다.')
+                else:
+                    self.metadata['package'] = 'com.other.app'
+                command, launch, _ = self.reinstall(updater)
+                command.assert_not_called()
+                launch.assert_not_called()
+                self.assertEqual(updater.status()['phase'], 'error')
+                self.assertFalse(updater.status()['data_deleted'])
+
     def test_partial_reinstall_failure_reports_whether_data_was_deleted(self):
         for failure, deleted in [('uninstall', None), ('install', True)]:
             with self.subTest(failure=failure):
@@ -267,6 +338,17 @@ class ApkInspectorTest(unittest.TestCase):
         self.assertEqual(metadata, {'package': 'com.chamsae.chaekchaek', 'version_code': 10,
                                     'version_name': '1.3.0', 'signer_sha256': 'a' * 64})
         self.assertEqual(run.call_args.args[0], ['apksigner', 'verify', '--print-certs', 'sample.apk'])
+
+    def test_reports_every_signer_for_allowlist_check(self):
+        inspector = ApkInspector()
+        certificates = '\n'.join([
+            'Signer #1 certificate SHA-256 digest: ' + 'A' * 64,
+            'V2 Signer: certificate SHA-256 digest: ' + 'a' * 64,
+            'Signer #2 certificate SHA-256 digest: ' + 'b' * 64])
+        with patch.object(inspector, '_tool', side_effect=lambda name: name), \
+             patch('app_update.device.run', side_effect=[
+                 "package: name='com.chamsae.chaekchaek' versionCode='10' versionName='1.3.0'", certificates]):
+            self.assertEqual(inspector.inspect(Path('sample.apk'))['signer_sha256'], 'a' * 64 + ', ' + 'b' * 64)
 
     def test_invalid_signatures_cannot_be_used_for_reinstall(self):
         inspector = ApkInspector()
