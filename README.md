@@ -63,6 +63,8 @@ Python 3.10 이상, Android SDK의 ADB와 Emulator, 생성한 AVD가 필요하�
 
 ## 책췍 APK 업데이트
 
+홈서버2의 Google 로그인 실패 원인과 빌드 서명 고정 후속 작업은 [세션 핸드오프](handoff.md)를 참고한다.
+
 개발 중인 checkout을 건드리지 않도록 서버에 플리파 전용 checkout을 준비하고 `PLIPA_APP_REPO`로 등록한다. 이 checkout은 `PLIPA_APP_BRANCH`와 같은 브랜치여야 하며 추적 중인 미커밋 변경이 없어야 한다. 소유자가 화면에서 에뮬레이터를 고르고 `데이터 유지하며 최신 앱 설치`를 누르면 다음 순서로 실행한다.
 
 1. `origin`의 등록된 브랜치만 fetch한다.
