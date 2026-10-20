@@ -31,7 +31,7 @@ class QARun:
     def begin(self):
         if not self.started:
             self.started = True
-            self.w.event('run', 'AI 테스트 시작', run_id=self.id, expected=self.expected,
+            self.w.event('run', 'AI 테스트 시작', run_id=self.id, goal=self.w.goal, expected=self.expected,
                          precondition=self.precondition, autonomous=self.autonomous,
                          images_ai_consent=self.screens, actor='mcp' if self.external else 'ai', fact=True)
             self.evidence.start()
@@ -178,7 +178,7 @@ class QARun:
             if self.timer:
                 self.timer.cancel()
             self.evidence.close()
-        self.result = {**result, 'run_id': self.id, 'expected': self.expected, 'finished': timestamp()}
+        self.result = {**result, 'run_id': self.id, 'expected': self.expected, 'finished': timestamp(), 'cancelled': w.stop.is_set()}
         w.event('verdict', {'pass':'통과','fail':'실패','inconclusive':'확인 불가'}[result['verdict']]+': '+result['reason'],
                 result=self.result, run_id=self.id, fact=False)
         return self.result

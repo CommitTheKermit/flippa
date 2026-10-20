@@ -11,8 +11,8 @@ let reinstallRequest = null;
 const screen = $('screen');
 const zoomSteps = [.75, 1, 1.25, 1.5, 1.75, 2];
 let screenZoom = 1;
-let screenBaseSize;
 const selected = new Set();
+let activeView='device', inspectionTool='ui', inspectionAttachment='', lastChatSession='';
 function notice(message, error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error);}
 async function api(path, data){
   const response=await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Plipa-CSRF':csrf},body:JSON.stringify(data)});
@@ -23,10 +23,13 @@ async function task(fn){try{await fn();await refresh();}catch(e){notice(e.messag
 function node(tag,content,className){const n=document.createElement(tag);if(content!==undefined)n.textContent=content;if(className)n.className=className;return n;}
 async function refresh(){
   state=await api('state');csrf=state.csrf;
+  updateWorkbenchHeader();
   $('identity').textContent=state.user+' · '+(state.role==='owner'?'소유자':'테스터');
   $('membersOpen').hidden=state.role!=='owner';
   $('boot').disabled=state.role!=='owner';
   const appUpdate=state.app_update||{available:false,running:false,phase:'idle',message:''};
+  $('updateOpen').disabled=!appUpdate.available;
+  $('updateOpen').title=appUpdate.available?'책췍 앱 업데이트':'서버에 업데이트할 앱이 설정되지 않았습니다';
   $('appUpdate').hidden=state.role!=='owner'||!appUpdate.available;
   $('appUpdateSource').textContent=appUpdate.available?appUpdate.name+' · '+appUpdate.branch+(appUpdate.revision?' · '+appUpdate.revision:''):'';
   $('appUpdateMessage').textContent=(appUpdate.message||'')+(appUpdate.installed?' · '+appUpdate.installed.replace(/\s+/g,' ').trim():'');
@@ -53,7 +56,7 @@ async function refresh(){
   updateDeviceControls();
   updateTargetHighlight();
   const scenarios=JSON.stringify(state.scenarios||[]);
-  if(scenarios!==lastScenarios){lastScenarios=scenarios;const old=$('scenarioSelect').value;$('scenarioSelect').replaceChildren(new Option('시나리오 선택',''));for(const s of state.scenarios||[])$('scenarioSelect').add(new Option(s.title,s.id));$('scenarioSelect').value=old;}
+  if(scenarios!==lastScenarios){lastScenarios=scenarios;const old=$('scenarioSelect').value;$('scenarioSelect').replaceChildren(new Option('시나리오 선택',''));for(const s of state.scenarios||[])$('scenarioSelect').add(new Option(s.title,s.id));$('scenarioSelect').value=old;renderScenarios();}
   $('mcpToggle').textContent=state.external_enabled?'로컬 MCP 연결 해제':'로컬 MCP 연결 허용';
   $('mcpHint').textContent=state.external_enabled?'현재 MCP 전송: UI 텍스트'+(state.external_logs?' · 로그':'')+(state.external_screens?' · 이미지':'')+'. 변경하려면 연결을 해제한 뒤 다시 허용하세요.':'같은 컴퓨터의 Codex에서 연결합니다. 연결 허용 시 위 전송 선택을 적용합니다. 새 테스트나 재시작 시 해제됩니다.';
   $('mcpToggle').disabled=!!(appUpdate.running||state.running||state.pending||!state.session);
@@ -61,14 +64,18 @@ async function refresh(){
   $('scenarioRun').disabled=!!(appUpdate.running||state.running||state.pending||!state.session);
   const verdict=state.result;
   $('runResult').hidden=!verdict;
-  if(verdict){$('runResult').dataset.verdict=verdict.verdict;$('runResult').textContent=({pass:'통과',fail:'실패',inconclusive:'확인 불가'}[verdict.verdict]||'확인 불가')+' · '+verdict.reason;if(verdict.evidence_ids?.length){const b=node('button','판정 근거 보기');b.type='button';b.onclick=()=>{const ids=new Set(verdict.evidence_ids);let first;for(const e of state.events){const row=document.getElementById('event-'+e.id)?.closest('.event');const match=ids.has(e.id)||ids.has(e.observation_id)||ids.has(e.step_id);row?.classList.toggle('verdict-evidence',match);if(match&&!first)first=row;}first?.scrollIntoView({behavior:'smooth',block:'center'});};$('runResult').append(b);}}
+  if(verdict){$('runResult').dataset.verdict=verdict.verdict;$('runResult').textContent=({pass:'통과',fail:'실패',inconclusive:'확인 불가'}[verdict.verdict]||'확인 불가')+' · '+verdict.reason;if(verdict.evidence_ids?.length){const b=node('button','판정 근거 보기');b.type='button';b.onclick=()=>{switchView('evidence');const ids=new Set(verdict.evidence_ids);let first;for(const e of state.events){const row=document.getElementById('event-'+e.id)?.closest('.event');const match=ids.has(e.id)||ids.has(e.observation_id)||ids.has(e.step_id);row?.classList.toggle('verdict-evidence',match);if(match&&!first)first=row;}first?.scrollIntoView({behavior:'smooth',block:'center'});};$('runResult').append(b);}}
 
   const sessions=JSON.stringify(state.sessions);
   if(sessions!==lastSessions){lastSessions=sessions;const old=$('sessions').value;$('sessions').replaceChildren(new Option('기록 선택',''));for(const s of state.sessions)$('sessions').add(new Option(s.title+' · '+s.created.slice(0,10),s.id));$('sessions').value=old;}
   const events=JSON.stringify(state.events);
   if(events!==lastEvents){
     lastEvents=events;$('events').replaceChildren();
-    if(state.events.length)$('messages').replaceChildren();
+    renderChat();
+    renderActivity();
+    renderScenarios();
+    renderRecentSessions();
+    refreshInspection();
     for(const e of state.events){
       const row=node('div',undefined,'event'),check=document.createElement('input');check.type='checkbox';check.checked=selected.has(e.id);check.id='event-'+e.id;check.onchange=()=>check.checked?selected.add(e.id):selected.delete(e.id);
       const label=node('label');label.htmlFor=check.id;label.append(node('small',new Date(e.time).toLocaleTimeString('ko-KR')+' · '+e.id.slice(0,6)),node('strong',e.fact===true?'관측 기록':e.kind==='ai'?'AI 추정·제안':'사용자·시스템 기록'),node('span',e.message));
@@ -77,16 +84,20 @@ async function refresh(){
       if(e.step_id)label.append(node('small','연결된 단계: '+e.step_id));
       if(e.missing?.length)label.append(node('small','수집 누락: '+e.missing.join(' / ')));
       row.append(check,label);$('events').append(row);
-      if(['user','ai','error'].includes(e.kind)){const m=node('div',undefined,'message '+e.kind);m.append(node('small',e.kind==='user'?'나':e.kind==='ai'?'플리파 · AI 추정·제안':'실행 중단'),node('span',e.message));$('messages').append(m);}
+
     }
-    $('count').textContent=state.events.length;$('events').scrollTop=$('events').scrollHeight;$('messages').scrollTop=$('messages').scrollHeight;
+    $('count').textContent=state.events.length;$('events').scrollTop=$('events').scrollHeight;
   }
   $('approval').hidden=!state.pending;
   if(state.pending){const a=state.pending.action;$('approvalText').textContent=(state.pending.reason||'')+'\n'+a.message+'\n'+JSON.stringify({조작:a.kind,대상:a.target,입력:a.text});}
   const aiBusy=!!(appUpdate.running||state.running||state.pending);
+  $('takeOver').hidden=!(state.running||state.pending);
+  $('stop').disabled=!(state.running||state.pending);
+  document.querySelectorAll('[data-command]').forEach(b=>b.disabled=aiBusy||!state.session);
+  $('modelOptions').textContent=$('aiModel').selectedOptions[0].textContent.split(' · ')[0];
   $('send').disabled=!!(aiBusy||!state.ai_allowed||!state.session);$('approve').disabled=state.running;
   $('aiModel').disabled=aiBusy;$('aiReasoning').disabled=aiBusy;
-  $('aiState').textContent=!state.ai_allowed?'소유자가 AI 사용을 중지했습니다.':state.queue_position?'다른 요청 종료 후 실행 · 대기 '+state.queue_position+'번째':state.external_running?'외부 Codex에서 테스트 중 · 승인과 중지는 이 화면에서 할 수 있습니다.':state.running?'확인 중 · 남은 호출 '+state.steps_left+'회':state.pending?'사용자 확인을 기다립니다.':'조작 최대 '+state.step_limit+'회 + 최종 검증 1회';
+  $('aiState').textContent=!state.ai_allowed?'소유자가 AI 사용을 중지했습니다.':state.queue_position?'다른 요청 종료 후 실행 · 대기 '+state.queue_position+'번째':state.external_running?'외부 Codex에서 테스트 중 · 승인과 중지는 이 화면에서 할 수 있습니다.':state.running?'도구 실행 중 / QA 조작 '+state.steps_left+'회 남음':state.pending?'사용자 확인을 기다립니다.':'QA 조작 최대 '+state.step_limit+'회';
 }
 function aiControlsDevice(){return !!(state.running || state.pending || state.app_update?.running);}
 function updateDeviceControls(){
@@ -107,21 +118,11 @@ function updateDeviceControls(){
   $('screenHint').textContent=aiControl?'AI가 화면을 사용하고 있습니다. 화면을 보며 진행 상황을 확인할 수 있고, 중지 후 직접 조작할 수 있습니다.':interactive?'실시간 화면 · 클릭·드래그·영문 키보드로 조작하세요. 한글 입력은 에뮬레이터 키보드를 사용하세요.':'읽기 전용 미리보기입니다. 테스트를 시작하면 조작과 기록이 활성화됩니다.';
 }
 function updateScreenSize(){
-  if(!screen.width || !screen.height)return;
+  if(!screen.width || !screen.height || $('deviceView').hidden)return;
   const wrap=$('screenWrap');
-  if(screenZoom===1){
-    wrap.style.height='';
-    screenBaseSize={width:Math.max(1,wrap.clientWidth-32),height:Math.max(1,wrap.clientHeight-32),wrapHeight:wrap.clientHeight};
-  }else if(screenBaseSize){
-    wrap.style.height=Math.ceil(screenBaseSize.wrapHeight*screenZoom)+'px';
-  }else{
-    screenBaseSize={width:Math.max(1,wrap.clientWidth-32),height:Math.max(1,wrap.clientHeight-32),wrapHeight:wrap.clientHeight};
-    wrap.style.height=Math.ceil(screenBaseSize.wrapHeight*screenZoom)+'px';
-  }
-  const fit=Math.min(screenBaseSize.width/screen.width,screenBaseSize.height/screen.height,1);
-  const scale=fit*screenZoom;
-  screen.style.width=Math.round(screen.width*scale)+'px';
-  screen.style.height=Math.round(screen.height*scale)+'px';
+  const fit=Math.min(Math.max(1,wrap.clientWidth-40)/screen.width,Math.max(1,wrap.clientHeight-40)/screen.height,1);
+  screen.style.width=Math.round(screen.width*fit*screenZoom)+'px';
+  screen.style.height=Math.round(screen.height*fit*screenZoom)+'px';
   $('zoomValue').value=Math.round(screenZoom*100)+'%';
   $('zoomValue').textContent=Math.round(screenZoom*100)+'%';
   $('zoomOut').disabled=screenZoom===zoomSteps[0];
@@ -184,7 +185,7 @@ async function screenLoop(){
   }
   setTimeout(screenLoop,500);
 }
-$('startForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('start',{serial:$('devices').value,package:$('package').value,title:$('title').value});selected.clear();notice('테스트를 시작했습니다. 앱을 열고 조작하세요.');});};
+$('startForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('start',{serial:$('devices').value,package:$('package').value,title:$('title').value});selected.clear();$('setup').close();switchView('device');notice('테스트를 시작했습니다. 앱을 열고 조작하세요.');});};
 $('membersOpen').onclick=()=>$('members').showModal();
 $('membersClose').onclick=()=>$('members').close();
 $('debugRead').onclick=()=>task(async()=>{
@@ -218,7 +219,7 @@ $('appReinstallForm').onsubmit=e=>{
   task(async()=>{await api('app/reinstall',{...request,delete_data:true});notice('데이터 삭제 후 재설치를 시작했습니다. 진행 상태는 위에서 확인할 수 있습니다.');});
 };
 $('prepare').onclick=()=>task(async()=>{await api('prepare',{});await refreshDevices();notice('기본 에뮬레이터 준비를 다시 시작했습니다.');});
-$('load').onclick=()=>task(async()=>{await api('load',{id:$('sessions').value});selected.clear();notice('이전 기록을 열었습니다.');});
+$('load').onclick=()=>task(async()=>{await api('load',{id:$('sessions').value});selected.clear();switchView('device');notice('이전 기록을 열었습니다.');});
 $('launch').onclick=()=>{if(!state.session || aiControlsDevice())return;task(()=>api('launch',{}));};
 $('zoomOut').onclick=()=>changeScreenZoom(-1);
 $('zoomIn').onclick=()=>changeScreenZoom(1);
@@ -229,9 +230,12 @@ $('capture').onclick=()=>task(async()=>{const b=$('capture');b.disabled=true;try
 $('noteForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('note',{message:$('note').value});$('note').value='';});};
 function runOptions(){return {consent:$('consent').checked,consent_logs:$('consentLogs').checked,consent_screens:$('consentScreens').checked,autonomous:$('autonomous').checked,model:$('aiModel').value,reasoning_effort:$('aiReasoning').value};}
 function scenarioInputs(){return {goal:$('goal').value,expected:$('aiExpected').value,precondition:$('precondition').value};}
-$('chatForm').onsubmit=e=>{e.preventDefault();task(async()=>{await api('chat',{...scenarioInputs(),...runOptions()});notice('AI 테스트를 요청했습니다. 종료 후 기대 결과를 검증합니다.');});};
-$('scenarioSave').onclick=()=>task(async()=>{const values=scenarioInputs();const result=await api('scenarios/save',{...values,title:values.goal.split('\n')[0].slice(0,120)});notice('시나리오를 저장했습니다. 실행할 때마다 현재 화면에서 대상을 다시 찾습니다.');});
-$('scenarioLoad').onclick=()=>{const s=(state.scenarios||[]).find(s=>s.id===$('scenarioSelect').value);if(!s)return;for(const key of ['goal','expected','precondition'])$(key==='expected'?'aiExpected':key).value=s[key];notice('시작 조건과 대상 앱을 확인한 뒤 실행하세요. 앱 데이터는 자동 초기화하지 않습니다.');};
+$('chatForm').onsubmit=e=>{e.preventDefault();
+  if(!$('consent').checked){$('options').showModal();notice('화면 텍스트 전송에 동의한 뒤 지시를 보내세요.',true);return;}
+  task(async()=>{await api('chat',{...scenarioInputs(),...runOptions(),tools:true});$('goal').value='';notice('요청에 맞는 도구를 실행합니다.');});
+};
+$('scenarioSave').onclick=()=>task(async()=>{const values={goal:$('scenarioGoal').value,expected:$('scenarioExpected').value,precondition:$('scenarioPrecondition').value};const result=await api('scenarios/save',{...values,title:values.goal.split('\n')[0].slice(0,120)});notice('시나리오를 저장했습니다. 실행할 때마다 현재 화면에서 대상을 다시 찾습니다.');});
+$('scenarioLoad').onclick=()=>{const s=(state.scenarios||[]).find(s=>s.id===$('scenarioSelect').value);if(!s)return;$('scenarioGoal').value=s.goal;$('scenarioExpected').value=s.expected;$('scenarioPrecondition').value=s.precondition;for(const key of ['goal','expected','precondition'])$(key==='expected'?'aiExpected':key).value=s[key];notice('시작 조건과 대상 앱을 확인한 뒤 실행하세요. 앱 데이터는 자동 초기화하지 않습니다.');};
 $('scenarioRun').onclick=()=>task(async()=>{const id=$('scenarioSelect').value;if(!id)throw new Error('시나리오를 선택하세요.');await api('scenarios/run',{id,...runOptions()});notice('저장한 시나리오를 실행합니다.');});
 $('mcpToggle').onclick=()=>task(async()=>{await api('agent/settings',{enabled:!state.external_enabled,...runOptions()});notice('로컬 MCP 연결 설정을 변경했습니다.');});
 function updateTargetHighlight(){
@@ -246,7 +250,7 @@ function updateTargetHighlight(){
   box.style.width=((x2-x1)/width*r.width)+'px';
   box.style.height=((y2-y1)/height*r.height)+'px';
 }
-$('example').onclick=()=>{$('goal').value='현재 화면을 살펴보고 테스트할 항목을 알려줘';$('aiExpected').value='현재 화면의 주요 기능을 관측할 수 있다';$('goal').focus();};
+$('example').onclick=()=>{$('goal').value='현재 화면 구조를 확인해줘';$('goal').focus();};
 $('stop').onclick=()=>task(()=>api('stop',{}));
 $('approve').onclick=()=>task(()=>api('approve',{id:state.pending?.id,approved:true}));
 $('reject').onclick=()=>task(()=>api('approve',{id:state.pending?.id,approved:false}));
@@ -332,5 +336,150 @@ $('attachmentClose').onclick=()=>$('attachment').close();
 $('reportOpen').onclick=()=>{if(!selected.size){notice('타임라인에서 공유할 기록을 먼저 선택하세요.',true);return;}$('reportTitle').value=state.session?.title||'';$('steps').value=state.events.filter(e=>selected.has(e.id)).map((e,i)=>`${i+1}. ${e.message}`).join('\n');$('report').showModal();};
 $('reportClose').onclick=()=>$('report').close();
 $('exportForm').onsubmit=e=>{e.preventDefault();task(async()=>{const blob=await api('export',{ids:[...selected],title:$('reportTitle').value,steps:$('steps').value,expected:$('expected').value,actual:$('actual').value,ui:$('shareUi').checked,logs:$('shareLogs').checked,screens:$('shareScreens').checked});const url=URL.createObjectURL(blob),a=node('a');a.href=url;a.download='plipa-qa.zip';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);$('report').close();notice('선택한 기록을 내보냈습니다. 전달 전 ZIP 내용을 확인하세요.');});};
+function switchView(view){
+  activeView=view;
+  for(const name of ['device','evidence','scenarios'])$(name+'View').hidden=name!==view;
+  $('inspectionView').hidden=!['logs','structure'].includes(view);
+  if(view==='logs'||view==='structure'){
+    inspectionTool=view==='logs'?'logs':'ui';
+    $('inspectionTitle').textContent=view==='logs'?'앱 로그':'화면 구조';
+    inspectionAttachment='';refreshInspection();
+  }
+  document.querySelectorAll('[data-view]').forEach(b=>{
+    b.classList.toggle('selected',b.dataset.view===view);
+    if(b.getAttribute('role')==='tab'){b.setAttribute('aria-selected',String(b.dataset.view===view));b.tabIndex=b.dataset.view===view?0:-1;}
+  });
+  if(view==='device')requestAnimationFrame(updateScreenSize);
+  if(view==='scenarios')renderScenarios();
+}
+function updateWorkbenchHeader(){
+  const session=state.session;
+  if($('scenarioGoal').dataset.session!==(session?.id||'')){
+    $('scenarioGoal').dataset.session=session?.id||'';
+    for(const id of ['scenarioGoal','scenarioExpected','scenarioPrecondition'])$(id).value='';
+  }
+  $('sessionTitle').textContent=session?.title||'새 테스트';
+  $('projectName').textContent=session?.package?.split('.').at(-1)||'플리파';
+  $('deviceName').textContent=session?.serial||$('devices').selectedOptions[0]?.textContent.split(' · ')[0]||'연결된 기기';
+  $('deviceConnection').textContent=session?'테스트 연결':previewSerial?'읽기 전용':'기기 준비';
+  $('chatSession').textContent=session?.title||'현재 기기와 대화';
+  $('chatContext').textContent=session?session.serial+' / '+session.package:'새 테스트에서 기기와 앱을 선택하세요';
+  $('tabEvidenceCount').textContent=state.events.length;
+}
+function renderRecentSessions(){
+  $('recentSessions').replaceChildren();
+  for(const session of (state.sessions||[]).slice(0,5)){
+    const button=node('button',session.title,'session-item'+(session.id===state.session?.id?' current':''));
+    button.title=session.title;
+    button.onclick=()=>task(async()=>{await api('load',{id:session.id});selected.clear();switchView('device');});
+    $('recentSessions').append(button);
+  }
+}
+function renderActivity(){
+  $('activityList').replaceChildren();
+  for(const e of state.events.slice(-3).reverse()){
+    const row=node('div',undefined,'activity-line');
+    row.append(node('time',new Date(e.time).toLocaleTimeString('ko-KR',{hour12:false})),node('span',e.message));
+    $('activityList').append(row);
+  }
+}
+function renderScenarios(){
+  const previous=[...state.events].reverse().find(e=>e.kind==='run'&&e.goal);
+  if(previous&&!$('scenarioGoal').value){$('scenarioGoal').value=previous.goal;$('scenarioExpected').value=previous.expected;$('scenarioPrecondition').value=previous.precondition||'';}
+  $('scenarioList').replaceChildren();
+  for(const scenario of state.scenarios||[]){
+    const row=node('article',undefined,'scenario-card'),button=node('button','불러오기');
+    row.append(node('strong',scenario.title),node('p',scenario.expected),node('small',scenario.package,'hint'),button);
+    button.onclick=()=>{$('scenarioSelect').value=scenario.id;$('scenarioLoad').click();$('options').showModal();};
+    $('scenarioList').append(row);
+  }
+}
+async function refreshInspection(){
+  if(!['logs','structure'].includes(activeView))return;
+  const suffix=inspectionTool==='logs'?'-logcat.txt':'-ui.json';
+  const name=state.events.flatMap(e=>e.attachments||[]).filter(n=>n.endsWith(suffix)).at(-1);
+  if(!name){$('inspectionOutput').textContent='아직 조회한 기록이 없습니다. 지금 조회를 누르거나 채팅으로 요청하세요.';return;}
+  if(inspectionAttachment===name)return;
+  inspectionAttachment=name;const requestedTool=inspectionTool;
+  try{const response=await fetch('/api/attachment?name='+encodeURIComponent(name));if(!response.ok)throw Error('자료를 읽지 못했습니다.');const content=await response.text();if(inspectionTool===requestedTool&&inspectionAttachment===name)$('inspectionOutput').textContent=content;}
+  catch(e){inspectionAttachment='';notice(e.message,true);}
+}
+function openReportDraft(draft){
+  selected.clear();for(const id of draft.ids)selected.add(id);
+  for(const [id,key] of [['reportTitle','title'],['steps','steps'],['expected','expected'],['actual','actual']])$(id).value=draft[key]||'';
+  for(const id of ['shareUi','shareLogs','shareScreens'])$(id).checked=false;
+  lastEvents='';switchView('evidence');$('report').showModal();
+}
+function renderChat(){
+  const box=$('messages'),session=state.session?.id||'';
+  const pinned=box.scrollHeight-box.scrollTop-box.clientHeight<60||session!==lastChatSession;
+  const open=new Set([...box.querySelectorAll('details[open]')].map(d=>d.dataset.call));
+  const oldScroll=box.scrollTop;
+  const chatEvents=state.events.filter(e=>['user','ai','error','tool','run','verdict','debug','step'].includes(e.kind));
+  if(!chatEvents.length){
+    if(lastChatSession!==session){
+      const welcome=node('div',undefined,'welcome'),button=node('button','현재 화면 살펴보기');
+      welcome.append(node('span','P','ai-mark'),node('h3','어떤 작업을 확인할까요?'),node('p','하려는 일을 말해 주세요. 필요한 도구를 사용하고 근거를 남깁니다.'),node('p','기기를 직접 조작하다가 이어서 부탁해도 됩니다.','hint'),button);
+      button.onclick=()=>{$('goal').value='현재 화면 구조를 확인해줘';$('goal').focus();};box.replaceChildren(welcome);
+    }
+    lastChatSession=session;return;
+  }
+  lastChatSession=session;box.replaceChildren();
+  const calls=new Map();
+  for(const e of chatEvents)if(e.kind==='tool')calls.set(e.call_id,e);
+  const routedRuns=new Set([...calls.values()].map(e=>e.result?.run_id).filter(Boolean));
+  const seen=new Set();
+  for(const original of chatEvents){
+    const e=original.kind==='tool'?calls.get(original.call_id):original;
+    if(e.kind==='tool'){if(seen.has(e.call_id))continue;seen.add(e.call_id);}
+    if(['user','ai','error'].includes(e.kind)){
+      const message=node('div',undefined,'message '+e.kind);
+      message.append(node('small',e.kind==='user'?'나':e.kind==='ai'?'플리파 / AI 제안':'실행 중단'),node('span',e.message));box.append(message);continue;
+    }
+    if(e.kind==='verdict'||e.kind==='debug'&&e.call_id||e.kind==='run'&&routedRuns.has(e.run_id))continue;
+    let title=e.message,status='done',result=e.result,call=e.call_id||e.id;
+    if(e.kind==='tool'){
+      status=e.status;
+      if(result?.run_id){const verdict=state.events.find(v=>v.kind==='verdict'&&v.run_id===result.run_id);if(verdict){status=e.status==='cancelled'||verdict.result?.cancelled?'cancelled':'done';result={...result,summary:verdict.message};}}
+    }else if(e.kind==='run'){
+      const verdict=state.events.find(v=>v.kind==='verdict'&&v.run_id===e.run_id);
+      status=verdict?(verdict.result?.cancelled?'cancelled':'done'):state.pending?'waiting':state.running?'running':'cancelled';
+      title='QA 실행';result={view:'device',summary:verdict?.message||e.expected||'현재 화면에서 테스트합니다.'};
+    }else if(e.kind==='step'){
+      const related=state.events.filter(x=>x.step_id===e.id);
+      const action=related.find(x=>x.kind==='action');
+      title=action?'기기 조작 / '+(action.action?.kind||'입력'):'조작 전후 증거';
+      result={view:'evidence',summary:related.map(x=>x.message+(x.missing?.length?' / 누락: '+x.missing.join(', '):'')).join('\n')};
+    }else if(e.kind==='debug'){
+      const evidence=state.events.find(x=>x.step_id===e.id&&x.kind==='evidence');
+      status=evidence?.missing?.length?'error':evidence?'done':'running';
+      result={view:e.tool==='logs'?'logs':e.tool==='ui'?'structure':'evidence',summary:evidence?.missing?.join(' / ')||'조회한 자료가 증거 기록에 연결됩니다.'};
+    }
+    const details=node('details',undefined,'tool-call');details.dataset.call=call;details.dataset.status=status;details.open=open.has(call);
+    const summary=node('summary');summary.append(node('span',({done:'✓',running:'◌',waiting:'?',error:'!',cancelled:'□'})[status]||'•','tool-state'),node('span',title),node('span',({done:'완료',running:'실행 중',waiting:'승인 대기',error:'실패',cancelled:'중지'})[status],'tool-status'));
+    const detail=node('div',result?.summary||e.message,'tool-detail');
+    if(result?.view){const button=node('button',result.view==='report'?'초안 확인':'작업 도구에서 열기');button.onclick=()=>result.view==='report'?openReportDraft(result.draft):switchView(result.view);detail.append(button);}
+    details.append(summary,detail);box.append(details);
+  }
+  box.scrollTop=pinned?box.scrollHeight:oldScroll;
+}
+document.querySelectorAll('[role=tab]').forEach(tab=>tab.onkeydown=e=>{
+  const tabs=[...document.querySelectorAll('[role=tab]')];
+  if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){
+    e.preventDefault();const current=tabs.indexOf(tab),index=e.key==='Home'?0:e.key==='End'?tabs.length-1:(current+(e.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+    tabs[index].click();tabs[index].focus();
+  }
+});
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>switchView(b.dataset.view));
+document.querySelectorAll('[data-command]').forEach(b=>b.onclick=()=>{$('goal').value=b.dataset.command;$('goal').focus();});
+for(const id of ['settingsOpen','openOptions','composeOptions','modelOptions'])$(id).onclick=()=>$('options').showModal();
+$('optionsClose').onclick=()=>$('options').close();
+$('newSession').onclick=()=>$('setup').showModal();$('setupClose').onclick=()=>$('setup').close();
+$('updateOpen').onclick=()=>$('updateDialog').showModal();$('updateClose').onclick=()=>$('updateDialog').close();
+$('inspectionRefresh').onclick=()=>task(async()=>{await api('debug',{tool:inspectionTool});inspectionAttachment='';});
+$('takeOver').onclick=()=>task(async()=>{await api('stop',{});notice('AI 중지를 요청했습니다. 실행이 끝나면 직접 조작할 수 있습니다.');});
+$('goal').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!$('send').disabled)$('chatForm').requestSubmit();}};
+$('aiModel').onchange=()=>{$('modelOptions').textContent=$('aiModel').selectedOptions[0].textContent.split(' · ')[0];};
+switchView('device');
 if(document.modelContext?.registerTool){Promise.resolve(document.modelContext.registerTool({name:'read_plipa_test_status',description:'Read the current Plipa session and event count. Does not expose QA evidence or execute device actions.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async input=>{if(!input||Object.keys(input).length)throw new Error('No arguments expected');await refresh();return {title:state.session?.title||null,running:state.running,awaitingApproval:!!state.pending,eventCount:state.events.length};}})).catch(()=>{});}
 (async()=>{try{await refresh();await refreshDevices();if(state.role==='owner'&&deviceState.phase==='idle'){await api('prepare',{});await refreshDevices();}}catch(e){notice(e.message,true);}screenLoop();async function poll(){try{await refresh();await refreshDevices();}catch(e){notice('플리파 서버에 연결되지 않았습니다. 실행 창을 확인하세요.',true);}setTimeout(poll,1500);}setTimeout(poll,1500);})();

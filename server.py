@@ -27,6 +27,7 @@ from access import AIGate, configured_users
 from debug_tools import DebugTools
 from qa import ScenarioStore, clean_text
 from qa_run import QARun
+from chat_tools import ChatTurn
 import external_agent
 from app_update import AppUpdater
 
@@ -76,6 +77,7 @@ class Workbench:
         self.step_limit = max(1, min(12, int(os.environ.get('PLIPA_AI_STEPS', '6'))))
         self.consent_logs = False
         self.qa_run = None
+        self.chat_turn = None
         self.cleanup_thread = None
         self.worker = None
         self.scenarios = ScenarioStore(root)
@@ -375,7 +377,7 @@ class Workbench:
                     raise
 
     def start_ai(self, goal, consent, consent_logs=False, model=None, reasoning_effort=None,
-                 expected='', precondition='', consent_screens=False, autonomous=True):
+                 expected='', precondition='', consent_screens=False, autonomous=True, chat_tools=False):
         with self.lock:
             self.session()
             if consent is not True:
@@ -388,7 +390,11 @@ class Workbench:
             self.goal = text(goal, 3000)
             self.ai_model, self.ai_reasoning_effort = ai.settings(model, reasoning_effort)
             self.steps_left = self.step_limit
-            self.qa_run = QARun(self, clean_text(expected, optional=True), clean_text(precondition, optional=True),
+            expected = clean_text(expected, optional=True)
+            precondition = clean_text(precondition, optional=True)
+            self.chat_turn = ChatTurn(expected, precondition, consent_screens is True,
+                                      autonomous is True) if chat_tools else None
+            self.qa_run = None if chat_tools else QARun(self, expected, precondition,
                                 autonomous=autonomous is True, screens=consent_screens is True)
             self.consent_logs = consent_logs is True
             self.event('user', self.goal, external_ai_consent=True, logs_ai_consent=self.consent_logs,
@@ -416,6 +422,10 @@ class Workbench:
                 self.running = False
 
     def _run_ai(self):
+        if self.chat_turn:
+            turn, self.chat_turn = self.chat_turn, None
+            turn.run(self)
+            return
         if self.qa_run is None or self.qa_run.finished:
             self.qa_run = QARun(self, autonomous=False)
         self.qa_run.run()
@@ -657,7 +667,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self.reply({'error': '자료 파일이 없습니다. 원본 기록은 유지됩니다.'}, 404)
                     payload = attachment.read_bytes()
                 return self.reply(payload, mime='image/png' if name.endswith('.png') else 'text/plain; charset=utf-8')
-            assets = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/stream.js': ('stream.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
+            assets = {'/favicon.svg': ('favicon.svg', 'image/svg+xml'), '/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/stream.js': ('stream.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
             if path in assets:
                 name, mime = assets[path]
                 return self.reply((ROOT/'dist'/name).read_bytes(), mime=mime)
@@ -855,7 +865,8 @@ class Handler(BaseHTTPRequestHandler):
                         w.start_ai(data.get('goal'), data.get('consent'), data.get('consent_logs'),
                                    data.get('model'), data.get('reasoning_effort'),
                                    expected=data.get('expected', ''), precondition=data.get('precondition', ''),
-                                   consent_screens=data.get('consent_screens'), autonomous=data.get('autonomous', True))
+                                   consent_screens=data.get('consent_screens'), autonomous=data.get('autonomous', True),
+                                   chat_tools=data.get('tools') is True)
                     elif path == '/api/note':
                         w.event('note', text(data.get('message')), fact=False)
                     elif path == '/api/export':
