@@ -85,11 +85,28 @@ class RemoteValidationTests(unittest.TestCase):
             worker.execute(job['id'])
         install.assert_not_called();self.assertEqual(self.store.get(job['id'])['state'],'failed')
 
+    def test_installed_signer_mismatch_stops_before_install(self):
+        worker=ValidationWorker(self.config)
+        candidate={'package':'com.example.app','signer_sha256':'a','version_code':2}
+        old={**candidate,'signer_sha256':'b'}
+        with patch('validation_worker.device.adb',side_effect=['package:/data/app/base.apk','']),patch('validation_worker.ApkInspector.inspect',side_effect=[candidate,old]):
+            with self.assertRaisesRegex(ValueError,'서명'):worker.inspect_install_target('emulator-5554',self.root/'apk',self.root)
+
     def test_existing_device_is_not_taken_over(self):
         job=self.submit();worker=ValidationWorker(self.config);worker.job=job['id']
         with patch('validation_worker.device.find_avd',return_value={'serial':'existing'}),patch('validation_worker.device.boot') as boot:
             with self.assertRaises(ResourceBusy):worker.install_and_smoke(self.root/'fake.apk',self.root)
         boot.assert_not_called()
+
+    def test_untrusted_post_is_rejected_before_device_lock(self):
+        from server import Handler
+        from unittest.mock import Mock
+        handler=Handler.__new__(Handler)
+        handler.trusted=Mock(return_value=False);handler.reply=Mock()
+        with patch('server.remote_resource') as lock:
+            handler.do_POST()
+        lock.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1],403)
 
     def test_existing_lease_cannot_be_taken_even_when_device_is_stopped(self):
         from validation_device_lease import DeviceLease

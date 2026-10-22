@@ -1,6 +1,6 @@
+"""플리파: 개인 서버의 사용자별 Android 디버깅·QA 작업실."""
 from validation_jobs import ResourceBusy
 from validation_resource import remote_resource
-"""플리파: 개인 서버의 사용자별 Android 디버깅·QA 작업실."""
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -749,6 +749,12 @@ class Handler(BaseHTTPRequestHandler):
             worker.join(timeout=3)
 
     def do_POST(self):
+        if not self.trusted():
+            return self.reply({'error': '접근이 거부됐습니다. 화면을 새로고침하세요.'}, 403)
+        if not self.identify():
+            return
+        if not secrets.compare_digest(self.headers.get('X-Plipa-CSRF', ''), self.csrf):
+            return self.reply({'error': '접근이 거부됐습니다. 화면을 새로고침하세요.'}, 403)
         if urlsplit(self.path).path == '/api/stream':
             return self._do_POST()
         try:
@@ -758,12 +764,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply({'error': str(error)}, 409)
 
     def _do_POST(self):
-        if not self.trusted():
-            return self.reply({'error': '접근이 거부됐습니다. 화면을 새로고침하세요.'}, 403)
-        if not self.identify():
-            return
-        if not secrets.compare_digest(self.headers.get('X-Plipa-CSRF', ''), self.csrf):
-            return self.reply({'error': '접근이 거부됐습니다. 화면을 새로고침하세요.'}, 403)
         try:
             length = int(self.headers.get('Content-Length', '0'))
             if not 0 < length <= 64000 or not self.headers.get('Content-Type', '').startswith('application/json'):

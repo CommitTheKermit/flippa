@@ -138,6 +138,24 @@ class ValidationWorker:
             raise ValueError('실제 실행된 단위 테스트가 없거나 실패했습니다.')
         return totals
 
+    def inspect_install_target(self, serial, apk, artifacts):
+        inspector=ApkInspector()
+        candidate=inspector.inspect(apk)
+        paths=device.adb(serial,'shell','pm','path',self.config['package']).splitlines()
+        paths=[line.removeprefix('package:').strip() for line in paths if line.startswith('package:')]
+        installed=None
+        if paths:
+            base=next((path for path in paths if path.endswith('/base.apk')),paths[0])
+            with tempfile.TemporaryDirectory(prefix='plipa-compare-') as folder:
+                previous=Path(folder)/'installed.apk'
+                device.adb(serial,'pull',base,str(previous),timeout=120)
+                installed=inspector.inspect(previous)
+            if installed['package']!=candidate['package'] or installed['signer_sha256']!=candidate['signer_sha256']:
+                raise ValueError('기존 앱과 패키지 또는 서명이 달라 데이터를 유지한 설치를 중단합니다.')
+            if installed['version_code']>candidate['version_code']:
+                raise ValueError('기존 앱보다 낮은 버전은 자동 설치하지 않습니다.')
+        (artifacts/'install-check.json').write_text(json.dumps({'candidate':candidate,'installed':installed},ensure_ascii=False),encoding='utf-8')
+
     def install_and_smoke(self, apk, artifacts):
         avd=self.config['avd']
         if device.find_avd(avd):
@@ -162,6 +180,7 @@ class ValidationWorker:
             else: raise ValueError('검증 기기 부팅 시간이 초과됐습니다.')
             self.store.phase(self.job,'installing')
             # install -r fails closed on signer mismatch or downgrade, never uninstalls.
+            self.inspect_install_target(serial,apk,artifacts)
             device.adb(serial,'install','-r',str(apk),timeout=300)
             self.check_cancel(); self.store.phase(self.job,'smoke')
             package=self.config['package']
@@ -183,6 +202,8 @@ class ValidationWorker:
         finally:
             if started:
                 entry=device.find_avd(avd)
+                if not entry and serial is None:
+                    raise ResourceBusy('부팅한 기기의 종료 상태를 확인하지 못해 임대와 다음 작업을 차단합니다.')
                 if entry:
                     # Only the job's own AVD is stopped; do not use global adb resets.
                     device.adb(entry['serial'],'emu','kill',timeout=10)
@@ -202,7 +223,7 @@ class ValidationWorker:
             profile=self.config['profiles'][request['profile']]
             project=checkout/'android'
             wrapper=project/('gradlew.bat' if os.name=='nt' else 'gradlew')
-            self.command([str(wrapper),*profile['tasks'],'--console=plain','--no-daemon','--max-workers=2'],project,'build-and-test',profile.get('timeout',1800))
+            self.command([str(wrapper),*profile['tasks'],'--console=plain','--no-daemon','--max-workers=2','-Pkotlin.compiler.execution.strategy=in-process'],project,'build-and-test',profile.get('timeout',1800))
             result['checks']['unit_tests']=self.test_results(checkout)
             apk=checkout/profile['apk']
             metadata=ApkInspector().inspect(apk)
@@ -225,9 +246,17 @@ class ValidationWorker:
                 path=target/relative
                 if path.is_file(): path.unlink()
             if target.exists():
-                cleanup=subprocess.run(['git','worktree','remove','--force',str(target)],cwd=self.config['app_repo'],capture_output=True)
-                if cleanup.returncode:
-                    result['cleanup_warning']='작업용 checkout 정리가 필요합니다.'
+                subprocess.run(['git','-c','core.longpaths=true','worktree','remove','--force',str(target)],cwd=self.config['app_repo'],capture_output=True)
+                if target.exists():
+                    # Windows may remove Git registration but leave read-only generated files.
+                    def remove_readonly(function, path, error):
+                        os.chmod(path, 0o700)
+                        function(path)
+                    try:
+                        shutil.rmtree(target,onerror=remove_readonly)
+                        subprocess.run(['git','worktree','remove','--force',str(target)],cwd=self.config['app_repo'],capture_output=True)
+                    except OSError:
+                        result['cleanup_warning']='작업용 checkout 정리가 필요합니다.'
             result['artifacts']=[str(p.relative_to(artifacts)).replace('\\','/') for p in artifacts.rglob('*') if p.is_file()]
             self.store.finish(job,state,result)
             (artifacts/'result.json').write_text(json.dumps(self.store.get(job),ensure_ascii=False,indent=2),encoding='utf-8')
