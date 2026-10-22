@@ -209,6 +209,7 @@ class ValidationWorker:
                     raise ResourceBusy('부팅한 기기의 종료 상태를 확인하지 못해 임대와 다음 작업을 차단합니다.')
                 if entry:
                     # Only the job's own AVD is stopped; do not use global adb resets.
+                    device.adb(entry['serial'],'shell','sync',timeout=20)
                     device.adb(entry['serial'],'emu','kill',timeout=10)
                     deadline=time.monotonic()+45
                     while device.find_avd(avd) and time.monotonic()<deadline: time.sleep(1)
