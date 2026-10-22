@@ -89,8 +89,15 @@ class RemoteValidationTests(unittest.TestCase):
         worker=ValidationWorker(self.config)
         candidate={'package':'com.example.app','signer_sha256':'a','version_code':2}
         old={**candidate,'signer_sha256':'b'}
-        with patch('validation_worker.device.adb',side_effect=['package:/data/app/base.apk','']),patch('validation_worker.ApkInspector.inspect',side_effect=[candidate,old]):
+        with patch('validation_worker.device.adb',side_effect=['package:com.example.app','package:/data/app/base.apk','']),patch('validation_worker.ApkInspector.inspect',side_effect=[candidate,old]):
             with self.assertRaisesRegex(ValueError,'서명'):worker.inspect_install_target('emulator-5554',self.root/'apk',self.root)
+
+    def test_first_install_does_not_call_pm_path_for_absent_package(self):
+        worker=ValidationWorker(self.config)
+        with patch('validation_worker.device.adb',return_value='') as adb,patch('validation_worker.ApkInspector.inspect',return_value={'package':'com.example.app'}):
+            worker.inspect_install_target('emulator-5554',self.root/'apk',self.root)
+        adb.assert_called_once_with('emulator-5554','shell','pm','list','packages','com.example.app')
+        self.assertIsNone(json.loads((self.root/'install-check.json').read_text())['installed'])
 
     def test_existing_device_is_not_taken_over(self):
         job=self.submit();worker=ValidationWorker(self.config);worker.job=job['id']

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -141,7 +142,9 @@ class ValidationWorker:
     def inspect_install_target(self, serial, apk, artifacts):
         inspector=ApkInspector()
         candidate=inspector.inspect(apk)
-        paths=device.adb(serial,'shell','pm','path',self.config['package']).splitlines()
+        listed=device.adb(serial,'shell','pm','list','packages',self.config['package']).splitlines()
+        present=('package:'+self.config['package']) in [line.strip() for line in listed]
+        paths=device.adb(serial,'shell','pm','path',self.config['package']).splitlines() if present else []
         paths=[line.removeprefix('package:').strip() for line in paths if line.startswith('package:')]
         installed=None
         if paths:
@@ -239,6 +242,8 @@ class ValidationWorker:
             state='blocked'; result['error']=str(error)
         except Exception as error:
             result['error']=self.clean_text(error)
+            result['failed_phase']=self.store.get(job)['phase']
+            (artifacts/'failure.log').write_text(self.clean_text(traceback.format_exc()),encoding='utf-8')
         finally:
             # Never retain keystore properties in job worktrees after completion.
             target=checkout or self.root/'worktrees'/job
