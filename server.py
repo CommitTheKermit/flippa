@@ -1,3 +1,5 @@
+from validation_jobs import ResourceBusy
+from validation_resource import remote_resource
 """플리파: 개인 서버의 사용자별 Android 디버깅·QA 작업실."""
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -119,20 +121,24 @@ class Workbench:
                 if time.monotonic() - self.last_emulator_activity < idle_seconds:
                     continue
                 managed = set(self.managed_avds)
-            stopped = set()
-            for entry in device.devices():
-                try:
-                    name = device.avd_name(entry['serial'])
-                    if name in managed:
-                        device.stop(entry['serial'])
-                        stopped.add(name)
-                except ValueError:
-                    continue
-            with self.lock:
-                # Missing names either failed to boot or were already stopped.
-                self.managed_avds.difference_update(managed)
-                if not self.managed_avds:
-                    return
+            try:
+                with remote_resource():
+                    stopped = set()
+                    for entry in device.devices():
+                        try:
+                            name = device.avd_name(entry['serial'])
+                            if name in managed:
+                                device.stop(entry['serial'])
+                                stopped.add(name)
+                        except ValueError:
+                            continue
+                    with self.lock:
+                        # Missing names either failed to boot or were already stopped.
+                        self.managed_avds.difference_update(managed)
+                        if not self.managed_avds:
+                            return
+            except ResourceBusy:
+                continue
 
     def close(self):
         self.shutdown.set()
@@ -630,6 +636,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply({**self.workbench.state(), 'csrf': self.csrf,
                     'user': self.user, 'role': self.role,
                     'members': registry.members() if registry and self.role == 'owner' else [],
+                    'device_preparing': bool(getattr(getattr(self.server, 'emulators', None), 'worker', None) and self.server.emulators.worker.is_alive()),
                     'app_update': (self.server.app_updater.status()
                                    if self.role == 'owner' and hasattr(self.server, 'app_updater') else
                                    {'available': False, 'running': False, 'phase': 'idle',
@@ -742,6 +749,15 @@ class Handler(BaseHTTPRequestHandler):
             worker.join(timeout=3)
 
     def do_POST(self):
+        if urlsplit(self.path).path == '/api/stream':
+            return self._do_POST()
+        try:
+            with remote_resource():
+                return self._do_POST()
+        except ResourceBusy as error:
+            return self.reply({'error': str(error)}, 409)
+
+    def _do_POST(self):
         if not self.trusted():
             return self.reply({'error': '접근이 거부됐습니다. 화면을 새로고침하세요.'}, 403)
         if not self.identify():
