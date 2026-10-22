@@ -142,7 +142,9 @@ class ValidationWorker:
     def inspect_install_target(self, serial, apk, artifacts):
         inspector=ApkInspector()
         candidate=inspector.inspect(apk)
-        listed=device.adb(serial,'shell','pm','list','packages',self.config['package']).splitlines()
+        listed=device.adb(serial,'shell','pm','list','packages','--user','0').splitlines()
+        if 'package:android' not in [line.strip() for line in listed]:
+            raise ValueError('패키지 관리자 준비 상태를 확인하지 못했습니다.')
         present=('package:'+self.config['package']) in [line.strip() for line in listed]
         paths=device.adb(serial,'shell','pm','path',self.config['package']).splitlines() if present else []
         paths=[line.removeprefix('package:').strip() for line in paths if line.startswith('package:')]
@@ -178,7 +180,12 @@ class ValidationWorker:
                 if entry:
                     serial=entry['serial']
                     lease.bind(serial)
-                    if entry['state']=='device' and device.boot_completed(serial): break
+                    if entry['state']=='device' and device.boot_completed(serial):
+                        try:
+                            packages=device.adb(serial,'shell','pm','list','packages','--user','0',timeout=10)
+                            if 'package:android' in packages.splitlines(): break
+                        except ValueError:
+                            pass
                 time.sleep(2)
             else: raise ValueError('검증 기기 부팅 시간이 초과됐습니다.')
             self.store.phase(self.job,'installing')
