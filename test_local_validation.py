@@ -1,8 +1,7 @@
 import contextlib
 import io
-import json
 from pathlib import Path
-import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -10,23 +9,24 @@ from local_validation import main
 
 
 class WrapperTests(unittest.TestCase):
-    def test_delegates_with_required_agent_coordination(self):
-        with patch('jev_mobile_use.cli.main', return_value=2) as run:
+    def test_delegates_only_to_shared_launcher(self):
+        with patch('local_validation.Path.is_file', return_value=True), \
+             patch('local_validation.subprocess.run', return_value=SimpleNamespace(returncode=2)) as run:
             self.assertEqual(main(['--scenario', 'case.json']), 2)
-            run.assert_called_once_with(['--scenario', 'case.json', '--coordination', 'agent'])
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[1], str(Path.home()/'.agents/skills/jev-local-validation/scripts/run.py'))
+            self.assertEqual(argv[2:], ['--scenario', 'case.json'])
+            self.assertEqual(run.call_args.kwargs, {'check': False})
 
-    def test_caller_cannot_replace_existing_agent_guard(self):
-        with patch('jev_mobile_use.cli.main', return_value=0) as run:
-            main(['--coordination', 'standalone'])
-            self.assertEqual(run.call_args.args[0][-2:], ['--coordination', 'agent'])
+    def test_runtime_info_is_forwarded_without_extra_arguments(self):
+        with patch('local_validation.Path.is_file', return_value=True), \
+             patch('local_validation.subprocess.run', return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(main(['--runtime-info']), 0)
+            self.assertEqual(run.call_args.args[0][2:], ['--runtime-info'])
 
-    def test_missing_dependency_reports_installation_without_traceback(self):
-        with patch.dict('sys.modules', {'jev_mobile_use.cli': None}), contextlib.redirect_stderr(io.StringIO()) as err:
+    def test_missing_launcher_never_uses_old_package(self):
+        with patch('local_validation.Path.is_file', return_value=False), \
+             patch('local_validation.subprocess.run') as run, contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(main([]), 2)
-            self.assertIn('requirements-jev.txt', err.getvalue())
-
-    def test_existing_example_still_validates_without_device(self):
-        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(main(['--scenario', str(Path(__file__).parent/'examples/local-validation.json'),
-                                  '--serial', 'emulator-5554', '--output', directory+'/out']), 0)
-            self.assertEqual(json.loads(out.getvalue())['status'], 'validated')
+            self.assertIn('스킬을 동기화', err.getvalue())
+            run.assert_not_called()

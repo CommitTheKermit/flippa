@@ -1,2 +1,2 @@
-# Optional local Android runner. GitHub read access is required.
-jev-mobile-use @ git+https://github.com/CommitTheKermit/jev-mobile-use.git@c04a7c86193d44aaaa4c72c89c67361bca8cd685
+# Optional direct CLI installation, Python 3.11-3.13. The Plipa wrapper uses the shared launcher.
+jev-mobile-use @ git+https://github.com/CommitTheKermit/jev-mobile-use.git@a43a0e917e1aed0eef3d1b46dcbf4e100055ae60
