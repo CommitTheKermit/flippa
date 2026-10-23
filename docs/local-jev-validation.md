@@ -1,6 +1,22 @@
 # Jev 로컬 Android 검증
 
-홈서버가 꺼졌을 때 명시적으로 선택하는 보조 CLI다. 웹 서버 없이 기존 플리파의 Android 트리와 입력 전송을 사용한다. 기존 원격 기본 경로와 웹 승인 정책은 바꾸지 않는다.
+홈서버가 꺼졌을 때 명시적으로 선택하는 보조 CLI다. 실행 엔진은 독립 비공개 저장소
+[jev-mobile-use](https://github.com/CommitTheKermit/jev-mobile-use)에 있다.
+플리파의 local_validation.py는 해당 패키지를 호출하고 기존 대기열·기기 임대 검사를 강제한다.
+기존 원격 기본 경로와 웹 승인 정책은 바꾸지 않는다.
+
+## 독립 패키지 설치
+
+GitHub 읽기 권한이 있는 환경에서 선택 의존성을 설치한다. requirements-jev.txt는 검증한
+커밋에 고정하며 기본 웹 서버 의존성과 분리한다. URL에 API 키나 GitHub 토큰을 넣지 않는다.
+
+```sh
+python3 -m pip install -r requirements-jev.txt
+```
+
+다른 Android 앱이나 플리파 없는 환경에서는 새 저장소의 CLI를 직접 사용한다.
+설치·시나리오 계약은 [독립 실행 안내](https://github.com/CommitTheKermit/jev-mobile-use/blob/codex/standalone-android/docs/usage.md)를 따른다.
+플리파 진입점의 --coordination 값은 agent로 고정되며 검사가 실패해도 standalone으로 전환하지 않는다.
 
 ## 참고한 구조
 
@@ -68,9 +84,11 @@ python3 local_validation.py --scenario /absolute/path/reviewed-scenario.json \
 
 ## 검증 상태
 
-- 가짜 기기와 API 응답을 사용한 회귀 검사: 성공 후조건, 거짓 done, 오래된 트리, 중복 대상, 저확신도, 반복 조작, 입력 제한, 응답 오류와 비밀값 마스킹.
+- 독립 저장소로 옮긴 가짜 기기와 API 응답 회귀 검사: 성공 후조건, 거짓 done, 오래된 트리, 중복 대상, 저확신도, 반복 조작, 입력 제한, 응답 오류와 비밀값 마스킹.
 - 임시 키로 실제 Jev API 호출을 확인했다. 이는 API 계약 확인이며 실제 Android 화면의 성능·성공률 증거가 아니다.
 - 실제 Android 기기 흐름, 한글 입력, 실기기, iOS와 시각적 잘림·겹침 검증은 미검증 또는 미지원이다.
+
+플리파에서는 독립 패키지 연결·agent 강제·기존 형식 검사와 기존 웹 동작을 검사한다.
 
 ```sh
 python3 -m unittest test_local_validation test_plipa
