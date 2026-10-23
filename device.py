@@ -15,6 +15,7 @@ PACKAGE = 'com.chamsae.chaekchaek.integration'
 
 
 def redact(text):
+    text = re.sub(r'\bapikey_[A-Za-z0-9_]{16,}\b', '[REDACTED]', text)
     text = re.sub(r'(?i)(bearer\s+)\S+', r'\1[REDACTED]', text)
     text = re.sub(r'(?i)([\"\']?(?:[\w.-]*(?:token|password|secret|api[_-]?key)|authorization|cookie|비밀번호)[\"\']?\s*[:=]\s*)(\"[^\"]*\"|\'[^\']*\'|[^\s,;&<]+)', r'\1[REDACTED]', text)
     text = re.sub(r'\beyJ[\w-]+\.[\w-]+\.[\w-]+\b|\bsk-[\w-]{12,}\b', '[REDACTED]', text)
@@ -83,6 +84,10 @@ def tree(serial):
         text = redact(a.get('text', '') or a.get('content-desc', ''))
         nodes.append({'id': len(nodes), 'text': text, 'bounds': bounds,
                       'resource': a.get('resource-id', ''), 'package': a.get('package', ''),
+                      'class': a.get('class', ''), 'focused': a.get('focused') == 'true',
+                      'editable': a.get('class', '').endswith('EditText'),
+                      'scrollable': a.get('scrollable') == 'true',
+                      'checked': a.get('checked') == 'true', 'selected': a.get('selected') == 'true',
                       'clickable': a.get('clickable') == 'true', 'enabled': a.get('enabled') == 'true'})
     return nodes
 

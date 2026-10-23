@@ -1,0 +1,11 @@
+{
+  "goal": "검색 화면을 열고 test 검색 결과를 확인한다",
+  "package": "com.example.app",
+  "allowed_actions": [
+    {"kind": "tap", "selector": {"resource": "com.example.app:id/search"}, "description": "검색 화면 열기"},
+    {"kind": "tap", "selector": {"resource": "com.example.app:id/query"}, "description": "검색 입력창에 포커스"},
+    {"kind": "text", "selector": {"resource": "com.example.app:id/query"}, "text": "test", "description": "검색 입력창에 test 입력"},
+    {"kind": "enter", "selector": {"resource": "com.example.app:id/query"}, "description": "입력한 검색어로 검색 실행"}
+  ],
+  "expect": [{"resource": "com.example.app:id/results", "text": "test"}]
+}

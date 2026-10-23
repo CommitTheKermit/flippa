@@ -114,3 +114,7 @@ node test_stream.mjs
 
 - [Emulator gRPC 원본 정의](https://android.googlesource.com/platform/tools/base/+/studio-master-dev/emulator/proto/emulator_controller.proto)
 - [Android Studio EmulatorView 구현](https://android.googlesource.com/platform/tools/adt/idea/+/refs/heads/mirror-goog-studio-main/streaming/src/com/android/tools/idea/streaming/emulator/EmulatorView.kt)
+
+## 로컬 Jev 보조 검증
+
+홈서버 없이 Android 트리 기반 검증을 실행하는 CLI는 [Jev 로컬 검증](docs/local-jev-validation.md)을 참고한다. 기존 웹 테스트와 별도로 선택하며 API 키, 공용 대기열과 기기 임대가 필요하다.
